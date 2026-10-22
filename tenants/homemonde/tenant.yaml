@@ -1,0 +1,1089 @@
+# HomeMonde tenant pack — the first deployment of the platform.
+#
+# Everything company-specific lives in this file. Column names, approval limits and source
+# ownership below are the starting assumptions for Phase 0 discovery: confirm each one against
+# HomeMonde's real exports before go-live (see README › Onboarding a company).
+
+id: homemonde
+name: HomeMonde
+business: >-
+  HomeMonde manufactures home textiles and home decor in Jaipur and sells them through its D2C
+  store, Amazon, Flipkart, Myntra, wholesale buyers and overseas markets. In scope: sales,
+  inventory, manufacturing, procurement and suppliers, logistics, finance and marketing of
+  HomeMonde's own business.
+timezone: Asia/Kolkata
+currency: INR
+date_order: DMY   # Indian exports write 05/10/2026 for 5 October
+
+ai:
+  # Strong tier: investigations, evidence-labelled statements and recommendations.
+  # Cheap tier: rewording verified text (briefs, notifications) and simple lookup questions.
+  # Either can be any provider (anthropic, openai, gemini, deepseek, huggingface, or one declared under
+  # providers) and can be switched per deployment through the environment, without editing this file.
+  strong: ${HOMEMONDE_STRONG_MODEL:-anthropic:claude-sonnet-5-5:medium}
+  cheap: ${HOMEMONDE_CHEAP_MODEL:-anthropic:claude-haiku-5-5:low}
+  premium: ${HOMEMONDE_PREMIUM_MODEL:-anthropic:claude-opus-5-5:medium}
+  routing: {question: cheap, brief: cheap, notification: cheap}
+  # Spend controls: Opus only for CRITICAL alerts; MEDIUM and LOW alerts report their verified figures with an
+  # Explain button; a repeat alert whose figures barely moved reuses the earlier explanation.
+  premium_for: [CRITICAL]
+  auto_explain: [CRITICAL, HIGH]
+  reuse_unchanged_days: 7
+  reuse_tolerance: 0.05
+  max_steps: 6
+  daily_token_budget: 2000000
+  daily_cost_budget_usd: 5
+  # Prices for non-Claude models are not built in; add them so cost can be compared, e.g.
+  # prices: {my-model-id: {input: 0.5, output: 1.5}}   # USD per million tokens
+
+sources:
+  exports:
+    type: csv
+    label: Daily system exports
+    owner: ERP / IT administrator
+    location: ${HOMEMONDE_EXPORTS_DIR}
+    schedule_minutes: 30
+  # Phase 0: confirm which system owns each export below, how often it refreshes, and who fixes it (owner).
+  # Each is its own source so a broken export only makes its own data stale.
+  factory:
+    type: csv
+    label: Production log
+    owner: Plant manager
+    location: ${HOMEMONDE_EXPORTS_DIR}
+    schedule_minutes: 60
+  marketing:
+    type: csv
+    label: Ads and marketing feed
+    owner: Performance marketing lead
+    location: ${HOMEMONDE_EXPORTS_DIR}
+    schedule_minutes: 60
+  accounts:
+    type: csv
+    label: Accounts ledger export
+    owner: Accounts team
+    location: ${HOMEMONDE_EXPORTS_DIR}
+    schedule_minutes: 240
+  shipping:
+    type: csv
+    label: Shipping and courier export
+    owner: Logistics coordinator
+    location: ${HOMEMONDE_EXPORTS_DIR}
+    schedule_minutes: 60
+  payables:
+    type: csv
+    label: Accounts payable export
+    owner: Accounts team
+    location: ${HOMEMONDE_EXPORTS_DIR}
+    schedule_minutes: 120
+  hrms:
+    type: csv
+    label: HRMS attendance export
+    owner: HR operations
+    location: ${HOMEMONDE_EXPORTS_DIR}
+    schedule_minutes: 240
+
+datasets:
+  inventory:
+    label: Inventory (WMS)
+    source: exports
+    extract: inventory.csv
+    mode: snapshot
+    key: [sku, location]
+    max_age_minutes: 120
+    fields:
+      sku: {required: true}
+      location: {required: true}
+      product_name: {}
+      available: {type: integer, required: true}
+      reserved: {type: integer, default: 0}   # blank means nothing reserved
+      incoming: {type: integer, default: 0}
+
+  order_lines:
+    label: Order lines (all channels)
+    source: exports
+    extract: order_lines.csv
+    key: [order_id, line_no]
+    date_field: order_date
+    max_age_minutes: 120
+    max_data_age_days: 2   # newest row older than this = the export stopped moving
+    fields:
+      order_id: {required: true}
+      line_no: {type: integer, required: true}
+      order_date: {type: date, required: true}
+      channel: {required: true}
+      sku: {required: true}
+      quantity: {type: integer, required: true}
+      net_amount: {type: number}
+      status: {required: true}
+      customer_email: {sensitive: true}
+
+  production_batches:
+    label: Production plan
+    source: exports
+    extract: production_batches.csv
+    key: [batch_id, sku]   # one batch can make several products, one row each
+    max_age_minutes: 240
+    fields:
+      batch_id: {required: true}
+      sku: {required: true}
+      quantity: {type: integer}
+      planned_start: {type: date}
+      run_days: {type: number}
+      status: {}
+      blocked_reason: {}
+      material_code: {}
+      material_required: {type: number}
+
+  purchase_orders:
+    label: Purchase orders (ERP)
+    source: exports
+    extract: purchase_orders.csv
+    key: [po_number]
+    max_age_minutes: 240
+    fields:
+      po_number: {required: true}
+      material_code: {required: true}
+      supplier: {required: true}
+      quantity: {type: number}
+      unit: {}
+      due_date: {type: date}
+      revised_eta: {type: date}
+      status: {}
+      unit_price: {type: number}   # used by the three-way match; optional in older exports
+
+  # Phase 0: confirm the goods receipt (GRN) and supplier invoice exports, their columns and the AP statuses.
+  goods_receipts:
+    label: Goods receipts (GRN)
+    source: payables
+    extract: goods_receipts.csv
+    key: [grn_number]
+    date_field: received_date
+    max_age_minutes: 360
+    fields:
+      grn_number: {required: true}
+      po_number: {required: true}
+      material_code: {}
+      quantity: {type: number, required: true}
+      unit: {}   # optional; compared with the order's unit in the three-way match
+      received_date: {type: date, required: true}
+
+  supplier_invoices:
+    label: Supplier invoices (AP)
+    source: payables
+    extract: supplier_invoices.csv
+    key: [voucher_id]   # the AP entry, so the same supplier invoice entered twice stays visible
+    date_field: invoice_date
+    max_age_minutes: 360
+    fields:
+      voucher_id: {required: true}
+      invoice_number: {required: true}
+      supplier: {required: true}
+      po_number: {}
+      material_code: {}
+      quantity: {type: number}
+      unit: {}   # optional
+      unit_price: {type: number}
+      total_amount: {type: number, required: true}
+      invoice_date: {type: date, required: true}
+      status: {}   # OPEN | ON_HOLD | PAID
+
+  supplier_scorecard:
+    label: Supplier scorecard
+    source: exports
+    extract: supplier_scorecard.csv
+    mode: snapshot
+    key: [supplier, material_code]
+    max_age_minutes: 1500
+    fields:
+      supplier: {required: true}
+      material_code: {required: true}
+      on_time_rate: {type: number}
+      pos_last_90d: {type: integer}
+      approved: {type: boolean}
+      lead_time_days: {type: number}
+      unit_price: {type: number}
+
+  # ---- Phase 0 assumptions: file names, columns and account names below must be confirmed
+  # ---- against HomeMonde's real production log, ads, accounts, courier and HRMS exports.
+  production_output:
+    label: Production output
+    source: factory
+    extract: production_output.csv
+    key: [log_date, line]
+    date_field: log_date
+    max_age_minutes: 1500
+    max_data_age_days: 3   # newest row older than this = the export stopped moving
+    fields:
+      log_date: {type: date, required: true}
+      line: {required: true}
+      planned_units: {type: integer, required: true}
+      produced_units: {type: integer, required: true}
+      downtime_minutes: {type: number, default: 0}   # blank means no downtime
+      downtime_reason: {}
+
+  marketing_spend:
+    label: Ad spend and attributed sales
+    source: marketing
+    extract: marketing_spend.csv
+    key: [spend_date, channel, campaign]
+    date_field: spend_date
+    max_age_minutes: 1500
+    max_data_age_days: 3   # newest row older than this = the export stopped moving
+    fields:
+      spend_date: {type: date, required: true}
+      channel: {required: true}
+      campaign: {required: true}
+      spend: {type: number, required: true}
+      attributed_revenue: {type: number}
+
+  ledger:
+    label: Ledger (P&L lines)
+    source: accounts
+    extract: ledger.csv
+    key: [entry_id]
+    signs: {field: amount, by: account, positive: [revenue],
+            negative: [cogs, marketplace_fees, ad_spend, shipping, returns, salaries, rent, utilities, overheads]}
+    date_field: entry_date
+    max_age_minutes: 2880
+    fields:
+      entry_id: {required: true}
+      entry_date: {type: date, required: true}
+      account: {required: true}   # revenue, cogs, marketplace_fees, ad_spend, shipping, returns, salaries, overheads
+      channel: {}
+      amount: {type: number, required: true}   # revenue positive, costs negative
+
+  shipments:
+    label: Shipments
+    source: shipping
+    extract: shipments.csv
+    key: [shipment_id]
+    date_field: ship_date
+    max_age_minutes: 1500
+    max_data_age_days: 3   # newest row older than this = the export stopped moving
+    fields:
+      shipment_id: {required: true}
+      order_id: {}
+      channel: {}
+      carrier: {required: true}
+      ship_date: {type: date, required: true}
+      promised_date: {type: date}
+      delivered_date: {type: date}
+      status: {required: true}   # in_transit, delivered, rto
+
+  attendance:
+    label: Attendance (HRMS)
+    source: hrms
+    extract: attendance.csv
+    key: [att_date, employee_id]
+    date_field: att_date
+    max_age_minutes: 2880
+    max_data_age_days: 4   # newest row older than this = the export stopped moving
+    fields:
+      att_date: {type: date, required: true}
+      employee_id: {required: true, sensitive: true}
+      department: {required: true}
+      status: {required: true}   # present, absent, leave
+
+metrics:
+  sellable_units:
+    label: Sellable stock
+    unit: units
+    version: "1.2"
+    dataset: inventory
+    agg: sum
+    value: available - reserved
+    by: [sku]
+  demand_7d:
+    label: Average daily demand (7 days)
+    unit: units/day
+    dataset: order_lines
+    agg: sum
+    value: quantity
+    where: {status: [confirmed, shipped, delivered]}
+    window_days: 7
+    per_day: true
+    by: [sku]
+  demand_30d:
+    label: Average daily demand (30 days)
+    unit: units/day
+    dataset: order_lines
+    agg: sum
+    value: quantity
+    where: {status: [confirmed, shipped, delivered]}
+    window_days: 30
+    per_day: true
+    by: [sku]
+  demand_7d_by_channel:
+    label: Average daily demand by channel (7 days)
+    unit: units/day
+    dataset: order_lines
+    agg: sum
+    value: quantity
+    where: {status: [confirmed, shipped, delivered]}
+    window_days: 7
+    per_day: true
+    by: [sku, channel]
+  stock_coverage_days:
+    label: Stock coverage
+    unit: days
+    version: "1.2"
+    formula: sellable_units / demand_7d
+    by: [sku]
+
+  # Company-wide headline figures for the Home screen
+  sales_7d: {label: Sales this week, unit: INR, dataset: order_lines, agg: sum, value: net_amount, where: {status: [confirmed, shipped, delivered]}, window_days: 7}
+  sales_prev_7d: {label: Sales last week, unit: INR, dataset: order_lines, agg: sum, value: net_amount, where: {status: [confirmed, shipped, delivered]}, window_days: 7, window_offset_days: 7}
+  plant_planned_7d: {label: Planned units this week, unit: units, dataset: production_output, agg: sum, value: planned_units, window_days: 7}
+  plant_produced_7d: {label: Produced units this week, unit: units, dataset: production_output, agg: sum, value: produced_units, window_days: 7}
+  plant_achievement_7d: {label: Factory output against plan, unit: share of plan, formula: plant_produced_7d / plant_planned_7d}
+  plant_planned_prev_7d: {label: Planned units last week, unit: units, dataset: production_output, agg: sum, value: planned_units, window_days: 7, window_offset_days: 7}
+  plant_produced_prev_7d: {label: Produced units last week, unit: units, dataset: production_output, agg: sum, value: produced_units, window_days: 7, window_offset_days: 7}
+  plant_achievement_prev_7d: {label: Factory output against plan last week, unit: share of plan, formula: plant_produced_prev_7d / plant_planned_prev_7d}
+  all_ad_spend_7d: {label: Ad spend this week, unit: INR, dataset: marketing_spend, agg: sum, value: spend, window_days: 7}
+  all_ad_revenue_7d: {label: Ad sales this week, unit: INR, dataset: marketing_spend, agg: sum, value: attributed_revenue, window_days: 7}
+  all_roas_7d: {label: Sales per rupee of ads, unit: x, formula: all_ad_revenue_7d / all_ad_spend_7d}
+  all_ad_spend_prev_7d: {label: Ad spend last week, unit: INR, dataset: marketing_spend, agg: sum, value: spend, window_days: 7, window_offset_days: 7}
+  all_ad_revenue_prev_7d: {label: Ad sales last week, unit: INR, dataset: marketing_spend, agg: sum, value: attributed_revenue, window_days: 7, window_offset_days: 7}
+  all_roas_prev_7d: {label: Sales per rupee of ads last week, unit: x, formula: all_ad_revenue_prev_7d / all_ad_spend_prev_7d}
+  all_late_share_14d: {label: Late deliveries, unit: share of delivered, dataset: shipments, agg: avg, value: (days_until_delivered_date - days_until_promised_date) > 0, where: {status: delivered}, window_days: 14}
+  all_late_share_prev_14d: {label: Late deliveries before, unit: share of delivered, dataset: shipments, agg: avg, value: (days_until_delivered_date - days_until_promised_date) > 0, where: {status: delivered}, window_days: 14, window_offset_days: 14}
+  all_absent_7d: {label: Absent person-days this week, unit: person-days, dataset: attendance, agg: count, where: {status: absent}, window_days: 7}
+  all_scheduled_7d: {label: Scheduled person-days this week, unit: person-days, dataset: attendance, agg: count, window_days: 7}
+  all_absence_7d: {label: Staff absence, unit: share of person-days, formula: all_absent_7d / all_scheduled_7d}
+  all_absent_prev_7d: {label: Absent person-days last week, unit: person-days, dataset: attendance, agg: count, where: {status: absent}, window_days: 7, window_offset_days: 7}
+  all_scheduled_prev_7d: {label: Scheduled person-days last week, unit: person-days, dataset: attendance, agg: count, window_days: 7, window_offset_days: 7}
+  all_absence_prev_7d: {label: Staff absence last week, unit: share of person-days, formula: all_absent_prev_7d / all_scheduled_prev_7d}
+  # Sales by channel, this week against last week (good news as well as problems)
+  revenue_7d_by_channel: {label: Sales value (last 7 days), unit: INR, dataset: order_lines, agg: sum, value: net_amount, where: {status: [confirmed, shipped, delivered]}, window_days: 7, by: [channel]}
+  revenue_prev_7d_by_channel: {label: Sales value (the 7 days before), unit: INR, dataset: order_lines, agg: sum, value: net_amount, where: {status: [confirmed, shipped, delivered]}, window_days: 7, window_offset_days: 7, by: [channel]}
+  revenue_growth_7d: {label: Sales growth week on week, unit: share of last week, formula: revenue_7d_by_channel / revenue_prev_7d_by_channel - 1, by: [channel]}
+  # A channel that stops sending orders while the export as a whole keeps moving (a marketplace listing or feed broke)
+  order_lines_30d_by_channel: {label: Order lines (30 days), unit: lines, dataset: order_lines, agg: count, window_days: 30, by: [channel]}
+  newest_order_day_by_channel: {label: Newest order, unit: days from today, dataset: order_lines, agg: max, value: days_until_order_date, window_days: 30, by: [channel]}
+  days_since_last_order: {label: Days since the last order, unit: days, formula: 0 - newest_order_day_by_channel, by: [channel]}
+  # Manufacturing
+  planned_7d: {label: Planned units (7 days), unit: units, dataset: production_output, agg: sum, value: planned_units, window_days: 7, by: [line]}
+  produced_7d: {label: Produced units (7 days), unit: units, dataset: production_output, agg: sum, value: produced_units, window_days: 7, by: [line]}
+  production_achievement_7d: {label: Production achievement (7 days), unit: share of plan, formula: produced_7d / planned_7d, by: [line]}
+  downtime_7d: {label: Downtime (7 days), unit: minutes, dataset: production_output, agg: sum, value: downtime_minutes, window_days: 7, by: [line]}
+  downtime_by_reason_7d: {label: Downtime by reason (7 days), unit: minutes, dataset: production_output, agg: sum, value: downtime_minutes, window_days: 7, by: [line, downtime_reason]}
+  # Marketing
+  ad_spend_7d: {label: Ad spend (7 days), unit: INR, dataset: marketing_spend, agg: sum, value: spend, window_days: 7, by: [channel]}
+  ad_revenue_7d: {label: Ad-attributed revenue (7 days), unit: INR, dataset: marketing_spend, agg: sum, value: attributed_revenue, window_days: 7, by: [channel]}
+  roas_7d: {label: Return on ad spend (7 days), unit: x, formula: ad_revenue_7d / ad_spend_7d, by: [channel]}
+  ad_spend_28d: {label: Ad spend (28 days), unit: INR, dataset: marketing_spend, agg: sum, value: spend, window_days: 28, by: [channel]}
+  ad_revenue_28d: {label: Ad-attributed revenue (28 days), unit: INR, dataset: marketing_spend, agg: sum, value: attributed_revenue, window_days: 28, by: [channel]}
+  roas_28d: {label: Return on ad spend (28 days), unit: x, formula: ad_revenue_28d / ad_spend_28d, by: [channel]}
+  campaign_spend_7d: {label: Spend by campaign (7 days), unit: INR, dataset: marketing_spend, agg: sum, value: spend, window_days: 7, by: [channel, campaign]}
+  # Finance (Phase 0: confirm the ledger sign convention and account names)
+  profit_30d: {label: Profit (last 30 days), unit: INR, dataset: ledger, agg: sum, value: amount, window_days: 30}
+  profit_prev_30d: {label: Profit (previous 30 days), unit: INR, dataset: ledger, agg: sum, value: amount, window_days: 30, window_offset_days: 30}
+  revenue_30d: {label: Revenue (last 30 days), unit: INR, dataset: ledger, agg: sum, value: amount, where: {account: revenue}, window_days: 30}
+  sales_30d: {label: Order sales (last 30 days), unit: INR, dataset: order_lines, agg: sum, value: net_amount, where: {status: [confirmed, shipped, delivered]}, window_days: 30}
+  revenue_prev_30d: {label: Revenue (previous 30 days), unit: INR, dataset: ledger, agg: sum, value: amount, where: {account: revenue}, window_days: 30, window_offset_days: 30}
+  pnl_30d_by_account: {label: P&L by account (last 30 days), unit: INR, dataset: ledger, agg: sum, value: amount, window_days: 30, by: [account]}
+  pnl_prev_30d_by_account: {label: P&L by account (previous 30 days), unit: INR, dataset: ledger, agg: sum, value: amount, window_days: 30, window_offset_days: 30, by: [account]}
+  # Logistics
+  shipments_14d: {label: Shipments (14 days), unit: shipments, dataset: shipments, agg: count, window_days: 14, by: [carrier]}
+  late_share_14d:
+    label: Late deliveries (14 days)
+    unit: share of delivered
+    dataset: shipments
+    agg: avg
+    value: (days_until_delivered_date - days_until_promised_date) > 0
+    where: {status: delivered}
+    window_days: 14
+    by: [carrier]
+  rto_14d: {label: Returned to origin (14 days), unit: shipments, dataset: shipments, agg: count, where: {status: rto}, window_days: 14, by: [carrier]}
+  rto_share_14d: {label: Return-to-origin rate (14 days), unit: share of shipments, formula: rto_14d / shipments_14d, by: [carrier]}
+  # People (aggregates only; individual records never reach the AI)
+  absent_days_7d: {label: Absent person-days (7 days), unit: person-days, dataset: attendance, agg: count, where: {status: absent}, window_days: 7, by: [department]}
+  headcount_days_7d: {label: Scheduled person-days (7 days), unit: person-days, dataset: attendance, agg: count, window_days: 7, by: [department]}
+  absence_rate_7d: {label: Absence rate (7 days), unit: share of person-days, formula: absent_days_7d / headcount_days_7d, by: [department]}
+  absent_days_28d: {label: Absent person-days (28 days), unit: person-days, dataset: attendance, agg: count, where: {status: absent}, window_days: 28, by: [department]}
+  headcount_days_28d: {label: Scheduled person-days (28 days), unit: person-days, dataset: attendance, agg: count, window_days: 28, by: [department]}
+  absence_rate_28d: {label: Absence rate (28 days), unit: share of person-days, formula: absent_days_28d / headcount_days_28d, by: [department]}
+
+  # Purchase orders still open (statuses to confirm in Phase 0). Days are relative to today.
+  po_days_overdue: {label: Days past the promised date, unit: days, dataset: purchase_orders, agg: max, value: "0 - days_until_due_date",
+                    where: {status: [OPEN, LATE, CONFIRMED, PARTIAL]}, by: [po_number]}
+  po_eta_slip_days: {label: Days the supplier's new date is later than promised, unit: days, dataset: purchase_orders, agg: max,
+                     value: "days_until_revised_eta - days_until_due_date", where: {status: [OPEN, LATE, CONFIRMED, PARTIAL]}, by: [po_number]}
+  # a blocked batch matters once it should have started: until then nothing is being held up
+  blocked_batch_lines: {label: Products in a blocked batch that should have started, unit: products, dataset: production_batches,
+                        agg: sum, value: days_until_planned_start <= 0, where: {status: BLOCKED}, by: [batch_id]}
+  po_quantity: {label: Quantity ordered, unit: units, dataset: purchase_orders, agg: sum, value: quantity,
+                where: {status: [OPEN, LATE, CONFIRMED, PARTIAL]}, by: [po_number]}
+
+# Phase 0: every threshold below is a starting assumption to confirm with HomeMonde's managers.
+rules:
+  - id: stockout_risk
+    version: "1.0"
+    description: Sellable stock covers less than 5 days of recent demand.
+    for_each: sku
+    when: stock_coverage_days < 5 and demand_7d > 0
+    metrics: [sellable_units, demand_7d, demand_30d, stock_coverage_days]
+    work_type: STOCKOUT_RISK
+    employee: inventory_ai
+    priority: HIGH
+    title: Stockout risk · {sku}
+    cooldown_hours: 24
+    batch: true   # every SKU at risk in one pass is investigated together
+    outcome_check: {after_days: 5, correct_when: action_taken == 1 or stock_coverage_days < 2}
+
+  - id: production_shortfall
+    description: A line produced less than 85% of its plan over the last 7 days.
+    for_each: line
+    when: production_achievement_7d < 0.85 and planned_7d > 0
+    metrics: [planned_7d, produced_7d, production_achievement_7d, downtime_7d]
+    work_type: PRODUCTION_SHORTFALL
+    employee: manufacturing_ai
+    priority: HIGH
+    title: Production below plan · {line}
+    outcome_check: {after_days: 7, correct_when: production_achievement_7d < 0.95 or action_taken == 1}
+
+  - id: roas_drop
+    description: Return on ad spend this week fell below 70% of its 28-day level on a channel with real spend.
+    for_each: channel
+    when: roas_7d < 0.7 * roas_28d and ad_spend_7d > 20000
+    metrics: [ad_spend_7d, ad_revenue_7d, roas_7d, roas_28d]
+    work_type: ROAS_DROP
+    employee: marketing_ai
+    priority: MEDIUM
+    title: Ad returns falling · {channel}
+    outcome_check: {after_days: 7, correct_when: roas_7d < roas_28d or action_taken == 1}
+
+  - id: revenue_mismatch
+    description: Revenue in the accounts and sales in the order system differ by more than 5% over the last 30 days.
+    when: abs(revenue_30d / sales_30d - 1) > 0.05 and sales_30d > 0 and revenue_30d > 0
+    metrics: [revenue_30d, sales_30d]
+    work_type: REVENUE_MISMATCH
+    employee: finance_ai
+    priority: HIGH
+    title: Accounts and order sales disagree
+    cooldown_hours: 168
+
+  - id: profit_drop
+    description: Profit over the last 30 days is more than 15% below the previous 30 days.
+    when: profit_30d < 0.85 * profit_prev_30d and profit_prev_30d > 0
+    metrics: [profit_30d, profit_prev_30d, revenue_30d, revenue_prev_30d]
+    work_type: PROFIT_DROP
+    employee: investigation_ai
+    priority: HIGH
+    title: Profit fell against the previous 30 days
+    cooldown_hours: 168
+
+  - id: carrier_delays
+    description: More than 20% of a carrier's delivered shipments arrived after the promised date.
+    for_each: carrier
+    when: late_share_14d > 0.2 and shipments_14d >= 30
+    metrics: [shipments_14d, late_share_14d, rto_share_14d]
+    work_type: CARRIER_DELAYS
+    employee: logistics_ai
+    priority: MEDIUM
+    title: Late deliveries · {carrier}
+
+  - id: channel_growth
+    sentiment: opportunity
+    description: A sales channel sold over 20% more this week than last week.
+    for_each: channel
+    when: revenue_growth_7d > 0.2 and revenue_prev_7d_by_channel > 100000
+    metrics: [revenue_7d_by_channel, revenue_prev_7d_by_channel, revenue_growth_7d]
+    work_type: CHANNEL_GROWTH
+    employee: sales_ai
+    priority: LOW
+    title: Sales growing · {channel}
+
+  - id: ads_paying_back_more
+    sentiment: opportunity
+    description: Ads on a channel are returning over 30% more per rupee than their 28-day level.
+    for_each: channel
+    when: roas_7d > 1.3 * roas_28d and ad_spend_7d > 20000
+    metrics: [ad_spend_7d, roas_7d, roas_28d]
+    work_type: ROAS_UP
+    employee: marketing_ai
+    priority: LOW
+    title: Ads paying back more · {channel}
+
+  - id: channel_silent
+    description: A sales channel with regular orders has sent none for more than 2 days.
+    for_each: channel
+    when: days_since_last_order > 2 and order_lines_30d_by_channel >= 50
+    metrics: [days_since_last_order, order_lines_30d_by_channel, revenue_7d_by_channel, revenue_prev_7d_by_channel]
+    work_type: CHANNEL_SILENT
+    employee: sales_ai
+    priority: HIGH
+    title: No orders from {channel}
+
+  - id: batch_blocked
+    description: A production batch that should have started is blocked.
+    for_each: batch_id
+    when: blocked_batch_lines > 0
+    metrics: [blocked_batch_lines]
+    work_type: BATCH_BLOCKED
+    employee: manufacturing_ai
+    priority: MEDIUM
+    title: Batch blocked · {batch_id}
+    batch: true
+
+  - id: po_overdue
+    description: An open purchase order is past the date the supplier promised.
+    for_each: po_number
+    when: po_days_overdue > 0
+    metrics: [po_days_overdue, po_eta_slip_days, po_quantity]
+    work_type: PO_OVERDUE
+    employee: procurement_ai
+    priority: HIGH
+    title: Purchase order overdue · {po_number}
+    cooldown_hours: 72
+    batch: true   # all overdue orders found in one pass are chased together
+
+  - id: po_eta_slipped
+    description: A supplier moved an open order's delivery date 3 or more days later, before it fell due.
+    for_each: po_number
+    when: po_eta_slip_days >= 3 and po_days_overdue <= 0
+    metrics: [po_eta_slip_days, po_days_overdue, po_quantity]
+    work_type: PO_ETA_SLIPPED
+    employee: procurement_ai
+    priority: MEDIUM
+    title: Delivery date slipped · {po_number}
+    cooldown_hours: 72
+    batch: true
+
+  - id: invoice_mismatch
+    kind: invoice_match
+    description: An open supplier invoice bills more than was received or ordered, or at a different price than the order.
+    invoice_match: {invoices: supplier_invoices, orders: purchase_orders, receipts: goods_receipts,
+                    quantity_tolerance: 0, price_tolerance: 0.01}
+    work_type: INVOICE_MISMATCH
+    employee: finance_ai
+    priority: HIGH
+    title: Invoice {invoice_number} does not match its order · {supplier}
+    cooldown_hours: 168
+
+  - id: duplicate_invoice
+    kind: duplicate
+    description: The same supplier invoice entered twice, or the same amount billed again within 45 days under another number.
+    duplicate: {dataset: supplier_invoices, window_days: 45}
+    work_type: DUPLICATE_INVOICE
+    employee: finance_ai
+    priority: HIGH
+    title: Possible duplicate invoice {invoice_number} · {supplier}
+    cooldown_hours: 168
+
+  - id: absenteeism
+    description: A department's absence rate over 7 days is above 15%.
+    for_each: department
+    when: absence_rate_7d > 0.15 and headcount_days_7d >= 50
+    metrics: [absence_rate_7d, absence_rate_28d, headcount_days_7d]
+    work_type: ABSENTEEISM
+    employee: hr_ai
+    priority: MEDIUM
+    title: High absence · {department}
+
+employees:
+  executive_ai:
+    name: Executive AI
+    title: Executive Intelligence
+    prefix: EXE
+    area: hq
+    color: "#22396B"
+    answers_questions: true
+    role: >-
+      Answer management questions about HomeMonde using colleagues' tools, rank findings from the
+      specialist employees, and bring decisions to the founder with their evidence.
+    tools: [get_stock_coverage]
+    # People AI is deliberately not here: HR figures are only seen by owners and managers of the people area.
+    can_ask: [inventory_ai, sales_ai, procurement_ai, manufacturing_ai, marketing_ai, finance_ai, logistics_ai]
+
+  inventory_ai:
+    name: Inventory AI
+    title: Inventory Intelligence
+    prefix: INV
+    area: warehouse
+    color: "#F28C28"
+    role: >-
+      Keep finished-goods stock healthy: investigate stockout risks and excess stock, find the
+      cause across demand, production and supply, and prepare evidence-backed recommendations.
+    tools: [get_inventory_position, get_production_schedule]
+    can_ask: [sales_ai, procurement_ai]
+    actions: [create_purchase_request]
+
+  sales_ai:
+    name: Sales AI
+    title: Sales Intelligence
+    prefix: SAL
+    area: sales
+    color: "#17A08E"
+    role: Understand sales and demand across D2C, marketplaces, wholesale and overseas.
+    tools: [get_sales_velocity, get_demand_by_channel, get_channel_sales]
+
+  procurement_ai:
+    name: Procurement AI
+    title: Procurement Intelligence
+    prefix: PRC
+    area: procurement
+    color: "#7262E4"
+    role: >-
+      Track every open purchase order line from issue to receipt: chase missing confirmations and slipped
+      dates, find which production batches and products a late order puts at risk, and draft supplier
+      follow-ups for the buyer to approve. Never places, changes or cancels an order.
+    tools: [get_purchase_order, get_purchase_orders, get_purchase_order_timing, get_supplier_performance]
+    can_ask: [manufacturing_ai, inventory_ai]
+    actions: [draft_supplier_followup]
+
+  manufacturing_ai:
+    name: Manufacturing AI
+    title: Manufacturing Intelligence
+    prefix: MFG
+    area: factory
+    color: "#C2557A"
+    role: >-
+      Keep production on plan: investigate shortfalls by line, downtime and its causes, material and
+      workforce availability, and prepare evidence-backed recommendations for the factory head.
+    tools: [get_line_output, get_downtime_reasons, get_production_schedule, get_batches_for_material]
+    can_ask: [procurement_ai, hr_ai]
+    actions: [reschedule_batch]
+
+  marketing_ai:
+    name: Marketing AI
+    title: Marketing Intelligence
+    prefix: MKT
+    area: marketing
+    color: "#2F8FD8"
+    role: Track ad spend and returns by channel and campaign, and find where marketing money stops paying back.
+    tools: [get_channel_roas, get_campaign_spend]
+    can_ask: [sales_ai]
+    actions: [adjust_ad_budget]
+
+  finance_ai:
+    name: Finance AI
+    title: Finance Intelligence
+    prefix: FIN
+    area: finance
+    color: "#3E9E5C"
+    role: >-
+      Explain HomeMonde's profit and loss by account and period using the ledger, strictly from verified figures,
+      and check supplier invoices against orders and goods received before they are paid: explain each mismatch
+      or duplicate and draft the query to the supplier. Never approves, holds or posts a payment.
+    tools: [get_profit_summary, get_pnl_by_account, get_invoice, get_receipts_for_order]
+    can_ask: [sales_ai, marketing_ai, procurement_ai]
+    actions: [raise_invoice_query]
+
+  logistics_ai:
+    name: Logistics AI
+    title: Logistics Intelligence
+    prefix: LOG
+    area: logistics
+    color: "#B5651D"
+    role: Watch deliveries by carrier (late deliveries, returns to origin) and raise carrier problems early.
+    tools: [get_carrier_performance]
+    can_ask: [sales_ai]
+    actions: [escalate_carrier]
+
+  hr_ai:
+    name: People AI
+    title: People / HR Intelligence
+    prefix: PPL
+    area: people
+    color: "#D9608C"
+    sensitive: true
+    role: >-
+      Watch workforce availability (attendance and absence by department) using aggregate figures only.
+      Never identify or discuss individual employees.
+    tools: [get_absence_by_department]
+
+  investigation_ai:
+    name: Investigation AI
+    title: Business Investigation Intelligence
+    prefix: BIZ
+    area: hq
+    color: "#5B6F9E"
+    role: >-
+      Trace business problems across departments, such as why profit fell: break the change into its
+      contributors using finance figures, then ask the specialist employees to check each contributor.
+    tools: [get_profit_summary, get_pnl_by_account]
+    can_ask: [sales_ai, marketing_ai, finance_ai, inventory_ai, manufacturing_ai, logistics_ai, procurement_ai]
+    effort: high
+    max_steps: 8
+
+tools:
+  get_inventory_position:
+    label: Stock in the warehouse
+    kind: lookup
+    description: Current stock position for a SKU by warehouse location (available, reserved, incoming).
+    area: warehouse
+    spot: rack
+    dataset: inventory
+    params:
+      sku: {required: true, description: "SKU code, e.g. HM-204"}
+      location: {description: Warehouse location code}
+    fields: [sku, location, product_name, available, reserved, incoming]
+  get_production_schedule:
+    label: Production plan for the product
+    kind: lookup
+    description: Production batches planned for a SKU, with status, blockers and material needs.
+    area: factory
+    dataset: production_batches
+    params:
+      sku: {required: true}
+    fields: [batch_id, sku, quantity, planned_start, run_days, status, blocked_reason, material_code, material_required]
+    order_by: planned_start
+  get_sales_velocity:
+    label: How fast it is selling
+    kind: metrics
+    description: Average daily demand for a SKU over the last 7 and 30 days.
+    area: sales
+    metrics: [demand_7d, demand_30d]
+    params:
+      sku: {required: true}
+  get_demand_by_channel:
+    label: Sales by channel (Amazon, website, etc.)
+    kind: metrics
+    description: Average daily demand for a SKU over 7 days, split by sales channel.
+    area: sales
+    metrics: [demand_7d_by_channel]
+    breakdown: channel
+    params:
+      sku: {required: true}
+  get_purchase_order:
+    label: One purchase order
+    kind: lookup
+    description: One purchase order by its number, with supplier, material, quantity, due date, revised ETA and status.
+    area: procurement
+    dataset: purchase_orders
+    params:
+      po_number: {required: true}
+    fields: [po_number, material_code, supplier, quantity, unit, due_date, revised_eta, status]
+  get_batches_for_material:
+    label: Production waiting on a material
+    kind: lookup
+    description: Production batches that need a raw material, with their product, start date, status and blockers.
+    area: factory
+    dataset: production_batches
+    params:
+      material_code: {required: true}
+    fields: [batch_id, sku, quantity, planned_start, status, blocked_reason, material_code, material_required]
+    order_by: planned_start
+  get_invoice:
+    label: Supplier invoice
+    kind: lookup
+    description: Every accounts-payable entry with this supplier invoice number, with order, quantity, price, amount, date and status.
+    area: finance
+    dataset: supplier_invoices
+    params:
+      invoice_number: {required: true}
+    fields: [voucher_id, invoice_number, supplier, po_number, material_code, quantity, unit_price, total_amount, invoice_date, status]
+  get_receipts_for_order:
+    label: Goods received on an order
+    kind: lookup
+    description: Goods receipts (GRN) recorded against a purchase order, with quantity and date.
+    area: finance
+    dataset: goods_receipts
+    params:
+      po_number: {required: true}
+    fields: [grn_number, po_number, material_code, quantity, received_date]
+    order_by: received_date
+  get_purchase_orders:
+    label: Orders placed with suppliers
+    kind: lookup
+    description: Open purchase orders for a raw material, with due dates and revised ETAs.
+    area: procurement
+    dataset: purchase_orders
+    params:
+      material_code: {required: true}
+    fields: [po_number, material_code, supplier, quantity, unit, due_date, revised_eta, status]
+  get_purchase_order_timing:
+    label: Which open orders are late
+    kind: metrics
+    description: >-
+      Every open purchase order with how many days it is past its promised date (positive = overdue, negative = not due
+      yet), most overdue first, and how many days the supplier's new date slipped. Use it to find late orders; no filter needed.
+    area: procurement
+    metrics: [po_days_overdue, po_eta_slip_days]
+    params:
+      po_number: {}
+    order: desc
+    limit: 25
+
+  get_supplier_performance:
+    label: Supplier reliability and prices
+    kind: lookup
+    description: Approved suppliers for a raw material with on-time rate, lead time and unit price.
+    area: procurement
+    dataset: supplier_scorecard
+    params:
+      material_code: {required: true}
+    fields: [supplier, material_code, on_time_rate, pos_last_90d, approved, lead_time_days, unit_price]
+  get_stock_coverage:
+    label: How many days the stock will last
+    kind: metrics
+    description: Days of stock cover by SKU (lowest first), with sellable stock and 7-day demand. Optionally for one SKU.
+    area: hq
+    metrics: [stock_coverage_days]
+    params:
+      sku: {}
+    limit: 15
+
+  get_line_output:
+    label: Factory output against plan
+    kind: metrics
+    description: Planned units, produced units, achievement and downtime over 7 days for a production line (or all lines).
+    area: factory
+    metrics: [planned_7d, produced_7d, production_achievement_7d, downtime_7d]
+    params:
+      line: {description: "Production line, e.g. PRINT-1"}
+  get_downtime_reasons:
+    label: Why machines stopped
+    kind: metrics
+    description: Downtime minutes over 7 days for a production line, by reason.
+    area: factory
+    metrics: [downtime_by_reason_7d]
+    breakdown: downtime_reason
+    params:
+      line: {required: true}
+  get_channel_sales:
+    label: Sales by channel, this week vs last week
+    kind: metrics
+    description: Sales value by channel for the last 7 days and the 7 days before, and the week-on-week growth.
+    area: sales
+    metrics: [revenue_7d_by_channel, revenue_prev_7d_by_channel, revenue_growth_7d]
+    params:
+      channel: {}
+  get_channel_roas:
+    label: Ad spend and the sales it brought
+    kind: metrics
+    description: Ad spend, attributed revenue and return on ad spend (7 and 28 days) for a channel (or all channels).
+    area: marketing
+    metrics: [ad_spend_7d, ad_revenue_7d, roas_7d, roas_28d]
+    params:
+      channel: {}
+  get_campaign_spend:
+    label: Spend per ad campaign
+    kind: metrics
+    description: Ad spend over 7 days for a channel, by campaign.
+    area: marketing
+    metrics: [campaign_spend_7d]
+    breakdown: campaign
+    params:
+      channel: {required: true}
+  get_profit_summary:
+    label: Profit and revenue, this month vs last
+    kind: metrics
+    description: Profit and revenue for the last 30 days and the 30 days before.
+    area: finance
+    metrics: [profit_30d, profit_prev_30d, revenue_30d, revenue_prev_30d]
+  get_pnl_by_account:
+    label: Where the money came from and went
+    kind: metrics
+    description: Ledger totals by account (revenue, cogs, marketplace_fees, ad_spend, shipping, returns...) for the last 30 days and the 30 days before.
+    area: finance
+    metrics: [pnl_30d_by_account, pnl_prev_30d_by_account]
+    breakdown: account
+  get_carrier_performance:
+    label: Courier delivery performance
+    kind: metrics
+    description: Shipments, late-delivery share and return-to-origin rate over 14 days for a carrier (or all carriers).
+    area: logistics
+    metrics: [shipments_14d, late_share_14d, rto_share_14d]
+    params:
+      carrier: {}
+  get_absence_by_department:
+    label: Staff absence by department
+    kind: metrics
+    description: Absence rate (7 and 28 days) and scheduled person-days for a department (or all departments). Aggregates only.
+    area: people
+    metrics: [absence_rate_7d, absence_rate_28d, headcount_days_7d]
+    params:
+      department: {}
+
+actions:
+  create_purchase_request:
+    label: Purchase request
+    description: Raise a purchase request for a raw material with a chosen supplier
+    handler: record
+    level: 2
+    area: procurement
+    amount: quantity * unit_price
+    params:
+      material_code: {required: true}
+      supplier: {required: true}
+      quantity: {type: number, required: true, minimum: 1}
+      unit: {}
+      unit_price: {type: number, required: true, minimum: 0, locked: true}   # the supplier's price, from the evidence
+      needed_by: {description: YYYY-MM-DD}
+    # Placeholder limits until Phase 0 confirms HomeMonde's approval matrix.
+    approvers:
+      - {role: manager, max_amount: 100000}
+      - {role: owner}
+
+  adjust_ad_budget:
+    label: Ad budget change
+    description: Change a campaign's daily budget for a number of days
+    handler: record
+    level: 2
+    area: marketing
+    amount: daily_budget * days
+    params:
+      channel: {required: true}
+      campaign: {required: true}
+      daily_budget: {type: number, required: true, minimum: 0}
+      days: {type: integer, required: true, minimum: 1, maximum: 30}
+    approvers:   # Phase 0 placeholder limits
+      - {role: manager, max_amount: 50000}
+      - {role: owner}
+
+  escalate_carrier:
+    label: Carrier escalation
+    description: Raise a formal service escalation with a courier partner
+    handler: record
+    level: 2
+    area: logistics
+    params:
+      carrier: {required: true}
+      issue: {required: true}
+    approvers:
+      - {role: manager}
+      - {role: owner}
+
+  draft_supplier_followup:
+    label: Supplier follow-up
+    description: >-
+      A follow-up to a supplier about one purchase order (confirmation, a firm delivery date, or shipping
+      documents). The buyer reads and approves the exact text before it counts.
+    # record: the approved text is kept in the action register for the buyer to send. To send it by email instead,
+    # set handler: email, add `email: {smtp_url: "${HOMEMONDE_SMTP_URL}", sender: purchase@homemonde.in}` and a
+    # `to` param (the buyer adds the supplier's address when approving if the data has none).
+    handler: record
+    level: 2
+    area: procurement
+    params:
+      supplier: {required: true}
+      po_number: {required: true}
+      subject: {required: true, description: one line}
+      message: {required: true, description: "polite, factual, at most 120 words; every date and quantity must come from the evidence"}
+    approvers:
+      - {role: manager}
+      - {role: owner}
+
+  raise_invoice_query:
+    label: Invoice query to supplier
+    description: >-
+      A query to a supplier about one invoice that does not match its order or goods received, or looks like a
+      duplicate, asking for a credit note or a corrected invoice. Accounts approve the exact text; payments are
+      held or released by people in the accounting system, never by the AI.
+    handler: record
+    level: 2
+    area: finance
+    params:
+      supplier: {required: true}
+      invoice_number: {required: true}
+      issue: {required: true, enum: [quantity, price, no_receipt, duplicate]}
+      message: {required: true, description: "polite, factual, at most 120 words; every figure must come from the evidence"}
+    approvers:
+      - {role: manager}
+      - {role: owner}
+
+  reschedule_batch:
+    label: Production reschedule
+    description: Move a production batch to a new start date (performed by the factory team; the AI only prepares it)
+    handler: record
+    level: 3
+    area: factory
+    params:
+      batch_id: {required: true}
+      new_start: {required: true, description: YYYY-MM-DD}
+      reason: {required: true}
+    approvers:
+      - {role: owner}
+
+# Regular reviews (Lock 12). Each runs once per period in company time and uses the employee's own tools.
+schedules:
+  - {id: daily_sales, employee: sales_ai, every: daily, hour: 9, title: Daily sales check, brief: "How did sales go yesterday compared with the last 7 days, by channel? Point out anything unusual."}
+  - {id: daily_stock, employee: inventory_ai, every: daily, hour: 9, title: Daily stock check, brief: "Which products have the fewest days of stock left, and is anything at risk of running out this week?"}
+  - {id: weekly_business, employee: executive_ai, every: weekly, weekday: mon, hour: 8, title: Weekly business review, brief: "How did the business do last week: sales, factory output, ad returns, deliveries and stock? What needs management attention?"}
+  - {id: weekly_suppliers, employee: procurement_ai, every: weekly, weekday: mon, hour: 10, title: Weekly supplier review, brief: "Which purchase orders are late or due this week, and which suppliers are least reliable?"}
+  - {id: monthly_finance, employee: finance_ai, every: monthly, day: 1, hour: 9, title: Monthly finance review, brief: "How did profit, revenue and each cost line change against the previous 30 days?"}
+  - {id: monthly_products, employee: sales_ai, every: monthly, day: 1, hour: 10, title: Monthly product review, brief: "Which products and channels grew or shrank most over the month?"}
+
+# Headline figures on the Home screen. Each belongs to an area: owners see all of them,
+# managers see the ones for their own areas (factory head: production, sales head: sales...).
+home:
+  kpis:
+    - {metric: sales_7d, compare: sales_prev_7d, area: sales}
+    - {metric: profit_30d, compare: profit_prev_30d, label: Profit (last 30 days), area: finance}
+    - {metric: plant_achievement_7d, compare: plant_achievement_prev_7d, area: factory}
+    - {metric: all_roas_7d, compare: all_roas_prev_7d, area: marketing}
+    - {metric: all_late_share_14d, compare: all_late_share_prev_14d, area: logistics, good: down}
+    - {metric: all_absence_7d, compare: all_absence_prev_7d, area: people, good: down}
+
+layout:
+  extent: [32, 16]
+  areas:
+    warehouse: {name: Warehouse, subtitle: Inventory · Jaipur WH, building: warehouse, footprint: [2, 1.5, 5, 4.5], height: 2.4, door: [7.55, 5.5], sign: WAREHOUSE, spots: {rack: [8.1, 3.4]}}
+    factory: {name: Factory, subtitle: "Cut, print and stitch lines", building: factory, footprint: [10.5, 1.5, 5, 4.5], height: 2.6, door: [14.2, 6.6], sign: FACTORY}
+    hq: {name: HQ · Management, subtitle: Executive and Investigation AI with the founder control room, building: tower, footprint: [17.2, 2.5, 4, 4.3], height: 5.1, door: [19, 7.25], sign: HQ · MANAGEMENT}
+    logistics: {name: Logistics hub, subtitle: Dispatch and courier partners, building: warehouse, footprint: [23.2, 1.6, 4.0, 3.8], height: 2.0, door: [27.75, 5.0], sign: LOGISTICS}
+    people: {name: People & HR, subtitle: Attendance and workforce (restricted), building: office, footprint: [28.6, 2.6, 2.8, 2.2], height: 1.8, door: [30.0, 5.2], sign: PEOPLE}
+    sales: {name: Sales, subtitle: "D2C, Amazon, Flipkart, Myntra", building: store, footprint: [3.5, 10.2, 3.8, 3.0], height: 2.0, door: [7.75, 11.7], sign: SALES}
+    procurement: {name: Procurement, subtitle: Purchase orders and suppliers, building: office, footprint: [10.6, 10.4, 3.6, 2.6], height: 1.9, door: [12.4, 13.4], sign: PROCUREMENT}
+    approvals: {name: Approval desk, subtitle: Recommendations waiting for a decision, building: pavilion, footprint: [16.4, 10.6, 3.2, 2.2], door: [18, 13.35], sign: APPROVALS}
+    marketing: {name: Marketing, subtitle: Ads and campaigns, building: office, footprint: [20.6, 10.4, 3.4, 2.6], height: 2.1, door: [22.3, 13.4], sign: MARKETING}
+    finance: {name: Finance, subtitle: Accounts and P&L, building: office, footprint: [25.0, 10.4, 3.4, 2.6], height: 2.3, door: [26.7, 13.4], sign: FINANCE}
+  roads:
+    - [0.2, 7.5, 31.6, 9.0]
+    - [8.0, 2.6, 9.5, 15.4]
+  walkways:
+    - [15.0, 9.0, 15.6, 14.4]
+    - [9.5, 13.8, 28.0, 14.4]
+    - [24.1, 9.0, 24.7, 14.4]
+  paths:
+    - [[0.8, 8.25], [8.75, 8.25], [14.2, 8.25], [15.3, 8.25], [19, 8.25], [24.4, 8.25], [27.75, 8.25], [30.0, 8.25], [31.2, 8.25]]
+    - [[8.75, 3.0], [8.75, 3.4], [8.75, 5.5], [8.75, 8.25], [8.75, 11.7], [8.75, 14.1]]
+    - [[8.75, 14.1], [12.4, 14.1], [15.3, 14.1], [18, 14.1], [22.3, 14.1], [24.4, 14.1], [26.7, 14.1]]
+    - [[15.3, 8.25], [15.3, 14.1]]
+    - [[24.4, 8.25], [24.4, 14.1]]
+  props:
+    - {type: rack, at: [7.15, 2.0], label: B-04}
+    - {type: pallets, at: [0.6, 5.6]}
+    - {type: truck, at: [6.4, 6.95], area: warehouse}
+    - {type: truck, at: [26.0, 6.6], area: logistics, dataset: shipments}
+    - {type: tanks, at: [16.1, 2.4]}
+    - {type: crates, at: [13.45, 13.15]}
+    - {type: crates, at: [23.4, 5.9]}
+    - {type: staff, at: [2.45, 6.95]}
+    - {type: staff, at: [12.1, 6.85]}
+    - {type: staff, at: [28.8, 6.4]}
+    - {type: tree, at: [0.8, 1.0]}
+    - {type: tree, at: [9.9, 0.9], size: 0.9}
+    - {type: tree, at: [16.95, 1.1], size: 0.85}
+    - {type: tree, at: [22.3, 2.2], size: 1.05}
+    - {type: tree, at: [22.4, 5.7], size: 0.9}
+    - {type: tree, at: [28.3, 1.2], size: 0.9}
+    - {type: tree, at: [31.2, 1.6], size: 1.0}
+    - {type: tree, at: [0.9, 10.2]}
+    - {type: tree, at: [1.3, 12.9], size: 1.1}
+    - {type: tree, at: [2.6, 14.9], size: 0.9}
+    - {type: tree, at: [6.4, 14.8]}
+    - {type: tree, at: [10.3, 15.3], size: 0.85}
+    - {type: tree, at: [14.4, 15.3]}
+    - {type: tree, at: [21.3, 15.1], size: 1.05}
+    - {type: tree, at: [29.6, 11.2], size: 0.9}
+    - {type: tree, at: [30.8, 13.6], size: 1.05}
+    - {type: tree, at: [28.9, 15.2]}
+    - {type: tree, at: [0.6, 3.4], size: 0.8}
+    - {type: bush, at: [16.1, 9.7]}
+    - {type: bush, at: [10.05, 9.9]}
+    - {type: bush, at: [4.2, 9.6]}
+    - {type: bush, at: [7.6, 14.9]}
+    - {type: bush, at: [19.9, 13.6]}
+    - {type: bush, at: [25.3, 15.0]}
+    - {type: lamp, at: [3.4, 7.3]}
+    - {type: lamp, at: [11.2, 7.3]}
+    - {type: lamp, at: [16.9, 7.3]}
+    - {type: lamp, at: [21.9, 7.3]}
+    - {type: lamp, at: [29.2, 7.3]}
+    - {type: lamp, at: [4.6, 9.2]}
+    - {type: lamp, at: [13.2, 9.2]}
+    - {type: lamp, at: [20.3, 9.2]}
+    - {type: lamp, at: [28.6, 9.2]}

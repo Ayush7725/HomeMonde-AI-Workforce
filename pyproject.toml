@@ -1,0 +1,37 @@
+[project]
+name = "ai-workforce"
+version = "0.1.0"
+description = "Multi-company AI workforce platform: trusted business data, event-driven AI employees, evidence-backed findings and human-controlled actions."
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
+  "sqlalchemy>=2.0",
+  "alembic>=1.13",
+  "pydantic>=2.7",
+  "pydantic-settings>=2.3",
+  "pyyaml>=6",
+  "anthropic>=1.0",
+  "psycopg[binary]>=3.2",
+  "cryptography>=42",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "httpx>=0.27"]
+
+[project.scripts]
+workforce = "workforce.cli:main"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["workforce*"]
+
+[tool.setuptools.package-data]
+workforce = ["web/*", "web/js/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+tmp_path_retention_policy = "failed"  # demo-company tests write sizeable data; keep /tmp small

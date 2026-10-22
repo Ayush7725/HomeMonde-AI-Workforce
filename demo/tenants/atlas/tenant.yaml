@@ -1,0 +1,333 @@
+# Demo company: Atlas Auto Parts — B2B auto parts distributor (USA).
+# Differs from the others: US date format (MM/DD/YYYY), "$1,234.50" amounts, "88%" percentages,
+# spreadsheet-style column names, two distribution centres, two stock systems that can disagree
+# (conflict rule), a supplier-delay rule and a Level 1 action that runs without approval.
+
+id: atlas
+name: Atlas Auto Parts
+business: >-
+  Atlas Auto Parts distributes brake, electrical and filtration parts to repair shops and fleets
+  across the US Midwest and South from distribution centres in Chicago and Dallas. In scope: sales,
+  stock in both DCs, purchasing and vendors, and transfers of Atlas Auto Parts' own business.
+timezone: America/Chicago
+currency: USD
+
+ai:
+  strong: ${DEMO_STRONG_MODEL:-anthropic:claude-opus-5-5:low}
+  cheap: ${DEMO_CHEAP_MODEL:-anthropic:claude-haiku-5-5:low}
+  max_steps: 5
+  daily_token_budget: 1000000
+
+sources:
+  files:
+    type: csv
+    label: Nightly exports (WMS + ERP)
+    location: ${ATLAS_DATA_DIR}
+    schedule_minutes: 60
+
+datasets:
+  wms_stock:
+    label: WMS stock
+    source: files
+    extract: wms_stock.csv
+    mode: snapshot
+    key: [stock_key]
+    max_age_minutes: 1500
+    fields:
+      stock_key: {column: Stock Key, required: true}
+      part: {column: Part Number, required: true}
+      dc: {column: DC, required: true}
+      on_hand: {column: Qty On Hand, type: integer, required: true}
+  erp_stock:
+    label: ERP stock
+    source: files
+    extract: erp_stock.csv
+    mode: snapshot
+    key: [stock_key]
+    max_age_minutes: 1500
+    fields:
+      stock_key: {column: ITEM_LOC, required: true}
+      on_hand: {column: ONHAND_QTY, type: integer, required: true}
+  sales_orders:
+    label: Sales orders
+    source: files
+    extract: sales_orders.csv
+    key: [order_no, line]
+    date_field: order_date
+    max_age_minutes: 1500
+    fields:
+      order_no: {column: "Order #", required: true}
+      line: {column: Line, type: integer, required: true}
+      order_date: {column: Order Date, type: date, format: "%m/%d/%Y", required: true}
+      customer: {column: Customer, sensitive: true}
+      part: {column: Part Number, required: true}
+      dc: {column: DC}
+      quantity: {column: Qty, type: integer, required: true}
+      amount: {column: Ext Price, type: number}
+      status: {column: Status, required: true}
+  purchase_orders:
+    label: Open purchase orders
+    source: files
+    extract: open_pos.csv
+    key: [po]
+    max_age_minutes: 1500
+    fields:
+      po: {column: PO, required: true}
+      vendor: {column: Vendor, required: true}
+      part: {column: Part Number, required: true}
+      quantity: {column: Qty Ordered, type: integer}
+      promise_date: {column: Promise Date, type: date, format: "%m/%d/%Y"}
+      status: {column: Status}
+  vendors:
+    label: Vendor scorecard
+    source: files
+    extract: vendor_scorecard.csv
+    mode: snapshot
+    key: [vendor]
+    max_age_minutes: 10080
+    fields:
+      vendor: {column: Vendor, required: true}
+      on_time_pct: {column: On-Time %, type: number}
+      lead_time_days: {column: Lead Time (days), type: number}
+      preferred: {column: Preferred, type: boolean}
+
+metrics:
+  on_hand:
+    label: Units on hand (both DCs)
+    unit: units
+    dataset: wms_stock
+    agg: sum
+    value: on_hand
+    by: [part]
+  on_hand_by_dc:
+    label: Units on hand by DC
+    unit: units
+    dataset: wms_stock
+    agg: sum
+    value: on_hand
+    by: [part, dc]
+  demand_7d:
+    label: Average daily demand (7 days)
+    unit: units/day
+    dataset: sales_orders
+    agg: sum
+    value: quantity
+    where: {status: [Open, Shipped, Invoiced]}
+    window_days: 7
+    per_day: true
+    by: [part]
+  demand_28d:
+    label: Average daily demand (28 days)
+    unit: units/day
+    dataset: sales_orders
+    agg: sum
+    value: quantity
+    where: {status: [Open, Shipped, Invoiced]}
+    window_days: 28
+    per_day: true
+    by: [part]
+  coverage_days:
+    label: Stock coverage
+    unit: days
+    formula: on_hand / demand_7d
+    by: [part]
+  late_pos:
+    label: Open POs past promise date
+    unit: POs
+    dataset: purchase_orders
+    agg: sum
+    value: days_until_promise_date < 0
+    where: {status: Open}
+    by: [vendor]
+
+rules:
+  - id: stock_mismatch
+    kind: conflict
+    description: WMS and ERP disagree on stock for a part at a DC.
+    conflict: {dataset: wms_stock, other: erp_stock, match_on: stock_key, field: on_hand, tolerance: 2}
+    work_type: DATA_CONFLICT
+    employee: inventory_ai
+    priority: HIGH
+    title: WMS and ERP disagree · {stock_key}
+  - id: vendor_delays
+    description: A vendor has two or more open POs past their promise date.
+    for_each: vendor
+    when: late_pos >= 2
+    metrics: [late_pos]
+    work_type: SUPPLIER_DELAY
+    employee: procurement_ai
+    priority: MEDIUM
+    title: Late POs · {vendor}
+  - id: stockout_risk
+    description: Stock across both DCs covers less than 7 days.
+    for_each: part
+    when: coverage_days < 7 and demand_7d > 0
+    metrics: [on_hand, demand_7d, demand_28d, coverage_days]
+    work_type: STOCKOUT_RISK
+    employee: inventory_ai
+    priority: HIGH
+    title: Stockout risk · {part}
+
+employees:
+  executive_ai:
+    name: Executive AI
+    title: Executive Intelligence
+    prefix: EXE
+    area: hq
+    color: "#22396B"
+    answers_questions: true
+    role: Answer leadership questions about Atlas Auto Parts using colleagues' tools.
+    tools: [get_coverage]
+    can_ask: [inventory_ai, sales_ai, procurement_ai]
+  inventory_ai:
+    name: Inventory AI
+    title: Inventory Intelligence
+    prefix: INV
+    area: chicago_dc
+    color: "#F28C28"
+    role: Keep both DCs stocked and the stock records trustworthy; balance stock between DCs.
+    tools: [get_stock_by_dc, get_erp_stock]
+    can_ask: [sales_ai, procurement_ai]
+    actions: [transfer_stock]
+  sales_ai:
+    name: Sales AI
+    title: Sales Intelligence
+    prefix: SAL
+    area: sales_desk
+    color: "#17A08E"
+    role: Understand demand by part from repair shops and fleets.
+    tools: [get_demand]
+  procurement_ai:
+    name: Purchasing AI
+    title: Procurement Intelligence
+    prefix: PUR
+    area: purchasing
+    color: "#7262E4"
+    role: Track open POs, vendor reliability and lead times; chase late deliveries.
+    tools: [get_open_pos, get_vendor_scorecard]
+    actions: [expedite_po]
+
+tools:
+  get_stock_by_dc:
+    label: Stock in each warehouse
+    kind: lookup
+    description: WMS stock for a part in each distribution centre.
+    area: chicago_dc
+    dataset: wms_stock
+    params:
+      part: {required: true}
+    fields: [stock_key, part, dc, on_hand]
+  get_erp_stock:
+    label: Stock in the accounting system
+    kind: lookup
+    description: ERP stock record for a stock key (PART@DC), to compare with the WMS.
+    area: dallas_dc
+    dataset: erp_stock
+    params:
+      stock_key: {required: true}
+    fields: [stock_key, on_hand]
+  get_demand:
+    label: How fast it is selling
+    kind: metrics
+    description: Average daily demand for a part over 7 and 28 days.
+    area: sales_desk
+    metrics: [demand_7d, demand_28d]
+    params:
+      part: {required: true}
+  get_open_pos:
+    label: Open orders with a vendor
+    kind: lookup
+    description: Open purchase orders for a vendor with part, quantity and promise date.
+    area: purchasing
+    dataset: purchase_orders
+    params:
+      vendor: {required: true}
+    fields: [po, vendor, part, quantity, promise_date, status]
+    order_by: promise_date
+  get_vendor_scorecard:
+    label: Vendor reliability
+    kind: lookup
+    description: Vendor on-time percentage, lead time and preferred status.
+    area: purchasing
+    dataset: vendors
+    params:
+      vendor: {required: true}
+    fields: [vendor, on_time_pct, lead_time_days, preferred]
+  get_coverage:
+    label: How many days the stock will last
+    kind: metrics
+    description: Days of stock cover by part (lowest first), optionally for one part.
+    area: hq
+    metrics: [coverage_days]
+    params:
+      part: {}
+    limit: 15
+
+actions:
+  transfer_stock:
+    label: DC transfer
+    description: Move units of a part between the Chicago and Dallas DCs (internal, reversible)
+    handler: record
+    level: 1
+    area: dallas_dc
+    params:
+      part: {required: true}
+      quantity: {type: integer, required: true, minimum: 1, maximum: 500}
+      from_dc: {required: true, enum: [CHI, DAL]}
+      to_dc: {required: true, enum: [CHI, DAL]}
+  expedite_po:
+    label: Expedite request
+    description: Ask a vendor to expedite an open purchase order
+    handler: record
+    level: 2
+    area: purchasing
+    params:
+      po: {required: true}
+      vendor: {required: true}
+      note: {}
+    approvers:
+      - {role: manager}
+      - {role: owner}
+
+layout:
+  extent: [24, 16]
+  areas:
+    chicago_dc: {name: Chicago DC, subtitle: Main distribution centre, building: warehouse, footprint: [2, 1.5, 5, 4.5], height: 2.6, door: [7.55, 5.5], sign: CHICAGO DC}
+    dallas_dc: {name: Dallas DC, subtitle: Southern distribution centre, building: warehouse, footprint: [10.5, 1.5, 5, 4.5], height: 2.2, door: [14.2, 6.6], sign: DALLAS DC}
+    hq: {name: HQ, subtitle: Leadership and Executive AI, building: tower, footprint: [17.2, 2.5, 4, 4.3], height: 5.4, door: [19, 7.25], sign: ATLAS HQ}
+    sales_desk: {name: Sales desk, subtitle: Repair shops and fleets, building: office, footprint: [3.5, 10.4, 3.6, 2.6], height: 1.9, door: [5.3, 13.4], sign: SALES}
+    purchasing: {name: Purchasing, subtitle: Vendors and open POs, building: office, footprint: [10.6, 10.4, 3.6, 2.6], height: 2.1, door: [12.4, 13.4], sign: PURCHASING}
+    approvals: {name: Approval desk, subtitle: Decisions waiting for leadership, building: pavilion, footprint: [16.4, 10.6, 3.2, 2.2], door: [18, 13.35], sign: APPROVALS}
+  roads:
+    - [0.2, 7.5, 22.8, 9.0]
+    - [8.0, 2.6, 9.5, 15.4]
+  walkways:
+    - [15.0, 9.0, 15.6, 14.4]
+    - [5.0, 13.8, 19.2, 14.4]
+  paths:
+    - [[0.8, 8.25], [8.75, 8.25], [14.2, 8.25], [15.3, 8.25], [19, 8.25], [22.5, 8.25]]
+    - [[8.75, 3.0], [8.75, 5.5], [8.75, 8.25], [8.75, 14.1]]
+    - [[5.3, 14.1], [8.75, 14.1], [12.4, 14.1], [15.3, 14.1], [18, 14.1]]
+    - [[15.3, 8.25], [15.3, 14.1]]
+  props:
+    - {type: truck, at: [6.4, 6.95]}
+    - {type: truck, at: [15.0, 6.95]}
+    - {type: rack, at: [7.15, 2.0], label: A-12}
+    - {type: pallets, at: [0.6, 5.6]}
+    - {type: pallets, at: [16.0, 1.6]}
+    - {type: staff, at: [2.45, 6.95]}
+    - {type: staff, at: [11.2, 6.9]}
+    - {type: tree, at: [0.8, 1.0]}
+    - {type: tree, at: [22.3, 2.2], size: 1.05}
+    - {type: tree, at: [22.4, 5.7], size: 0.9}
+    - {type: tree, at: [0.9, 10.2]}
+    - {type: tree, at: [1.3, 12.9], size: 1.1}
+    - {type: tree, at: [10.3, 15.3], size: 0.85}
+    - {type: tree, at: [20.9, 10.6]}
+    - {type: tree, at: [21.3, 15.1], size: 1.05}
+    - {type: bush, at: [16.1, 9.7]}
+    - {type: bush, at: [7.6, 14.9]}
+    - {type: lamp, at: [3.4, 7.3]}
+    - {type: lamp, at: [11.2, 7.3]}
+    - {type: lamp, at: [21.9, 7.3]}
+    - {type: lamp, at: [13.2, 9.2]}

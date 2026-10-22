@@ -1,0 +1,147 @@
+# AI-quality scenarios for HomeMonde (Lock 16). Run with: workforce eval --tenant homemonde
+# Each scenario loads its own small dataset into a throwaway database, runs the real rules, tools, models and
+# validation, and checks the result. Rows use the pack's field names. Dated rows use days_ago (a number or an
+# inclusive [from, to] range, one row per day); other dates accept "today", "today-4" or "today+2".
+# Real model calls are made, and billed, when credentials are set; without them the AI checks are skipped.
+# Phase 0: replace these synthetic cases with real past incidents once HomeMonde's history is available.
+
+- id: stockout_with_blocked_production
+  description: Fast-selling SKU with 3 days of cover, its production batch blocked on late fabric, and a faster approved supplier.
+  datasets:
+    inventory:
+      - {sku: HM-204, location: JAIPUR-WH, product_name: Indigo cushion cover, available: 320, reserved: 40, incoming: 0}
+    order_lines:
+      - {order_id: A7, line_no: 1, channel: amazon, sku: HM-204, quantity: 44, status: delivered, days_ago: [0, 6]}
+      - {order_id: D7, line_no: 1, channel: d2c, sku: HM-204, quantity: 51, status: delivered, days_ago: [0, 6]}
+      - {order_id: A30, line_no: 1, channel: amazon, sku: HM-204, quantity: 35, status: delivered, days_ago: [7, 29]}
+      - {order_id: D30, line_no: 1, channel: d2c, sku: HM-204, quantity: 28, status: delivered, days_ago: [7, 29]}
+    production_batches:
+      - {batch_id: PB-118, sku: HM-204, quantity: 1500, planned_start: today+1, run_days: 2, status: BLOCKED,
+         blocked_reason: waiting for fabric FAB-CT-02, material_code: FAB-CT-02, material_required: 800}
+    purchase_orders:
+      - {po_number: PO-7731, material_code: FAB-CT-02, supplier: Sanganer Textiles, quantity: 2000, unit: m,
+         due_date: today-4, revised_eta: today+4, status: LATE}
+    supplier_scorecard:
+      - {supplier: Sanganer Textiles, material_code: FAB-CT-02, on_time_rate: 0.71, pos_last_90d: 17, approved: true, lead_time_days: 12, unit_price: 158}
+      - {supplier: Bagru Cotton Mills, material_code: FAB-CT-02, on_time_rate: 0.94, pos_last_90d: 17, approved: true, lead_time_days: 2, unit_price: 162}
+  expect:
+    work: [{type: STOCKOUT_RISK, group: HM-204}, {type: PO_OVERDUE, group: PO-7731}]
+    findings:
+      STOCKOUT_RISK:
+        outcome: [FINDING]
+        quality: [CONFIRMED, LIKELY]
+        cites_tools: [get_production_schedule]
+        recommendation: create_purchase_request
+        no_validation_notes: true
+
+- id: healthy_stock_raises_nothing
+  description: Plenty of cover. No work should be created (false-positive check).
+  datasets:
+    inventory:
+      - {sku: HM-118, location: JAIPUR-WH, product_name: Linen table runner, available: 5000, reserved: 0, incoming: 0}
+    order_lines:
+      - {order_id: L, line_no: 1, channel: d2c, sku: HM-118, quantity: 20, status: delivered, days_ago: [0, 29]}
+  expect:
+    work: []
+
+- id: profit_drop_traced_across_departments
+  description: Profit falls because marketplace fees and ad spend rose; revenue is flat. Investigation AI must break it down by account.
+  datasets:
+    ledger:
+      - {entry_id: R1, account: revenue, channel: all, amount: 300000, days_ago: [0, 29]}
+      - {entry_id: C1, account: cogs, channel: all, amount: -135000, days_ago: [0, 29]}
+      - {entry_id: F1, account: marketplace_fees, channel: all, amount: -54000, days_ago: [0, 29]}
+      - {entry_id: A1, account: ad_spend, channel: all, amount: -36000, days_ago: [0, 29]}
+      - {entry_id: R2, account: revenue, channel: all, amount: 300000, days_ago: [30, 59]}
+      - {entry_id: C2, account: cogs, channel: all, amount: -135000, days_ago: [30, 59]}
+      - {entry_id: F2, account: marketplace_fees, channel: all, amount: -36000, days_ago: [30, 59]}
+      - {entry_id: A2, account: ad_spend, channel: all, amount: -24000, days_ago: [30, 59]}
+  expect:
+    work: [{type: PROFIT_DROP, group: None}]
+    findings:
+      PROFIT_DROP:
+        outcome: [FINDING]
+        cites_tools: [get_pnl_by_account]
+        mentions: [fee]
+        no_validation_notes: true
+
+- id: late_courier
+  description: A quarter of one courier's deliveries arrive late; the others are on time.
+  datasets:
+    shipments:
+      - {shipment_id: DL, carrier: Delhivery, channel: amazon, promised_date: today-2, delivered_date: today, status: delivered, days_ago: [3, 12]}
+      - {shipment_id: DO, carrier: Delhivery, channel: amazon, promised_date: today, delivered_date: today-1, status: delivered, days_ago: [3, 12]}
+      - {shipment_id: DO2, carrier: Delhivery, channel: d2c, promised_date: today, delivered_date: today-1, status: delivered, days_ago: [3, 12]}
+      - {shipment_id: DO3, carrier: Delhivery, channel: d2c, promised_date: today, delivered_date: today-1, status: delivered, days_ago: [3, 12]}
+      - {shipment_id: BD, carrier: BlueDart, channel: d2c, promised_date: today, delivered_date: today-1, status: delivered, days_ago: [3, 12]}
+  expect:
+    work: [{type: CARRIER_DELAYS, group: Delhivery}]
+    findings:
+      CARRIER_DELAYS:
+        outcome: [FINDING]
+        cites_tools: [get_carrier_performance]
+
+- id: late_fabric_order_holds_production
+  description: A fabric order is 4 days late and blocks a production batch; the buyer gets a grounded follow-up to approve.
+  datasets:
+    purchase_orders:
+      - {po_number: PO-7731, material_code: FAB-CT-02, supplier: Sanganer Textiles, quantity: 2000, unit: m,
+         due_date: today-4, revised_eta: today+4, status: LATE}
+      - {po_number: PO-7740, material_code: FAB-CT-01, supplier: Sanganer Textiles, quantity: 1500, unit: m,
+         due_date: today+6, revised_eta: today+6, status: OPEN}
+    production_batches:
+      - {batch_id: PB-118, sku: HM-204, quantity: 1500, planned_start: today+1, run_days: 2, status: BLOCKED,
+         blocked_reason: waiting for fabric FAB-CT-02, material_code: FAB-CT-02, material_required: 800}
+    supplier_scorecard:
+      - {supplier: Sanganer Textiles, material_code: FAB-CT-02, on_time_rate: 0.71, pos_last_90d: 17, approved: true, lead_time_days: 12, unit_price: 158}
+  expect:
+    work: [{type: PO_OVERDUE, group: PO-7731}]
+    findings:
+      PO_OVERDUE:
+        outcome: [FINDING]
+        cites_tools: [get_purchase_order]
+        recommendation: draft_supplier_followup
+        no_validation_notes: true
+
+- id: short_delivery_billed_in_full
+  description: A supplier bills 900 m but only 810 m arrived; the AI explains it and drafts a credit-note query for accounts.
+  datasets:
+    purchase_orders:
+      - {po_number: PO-7711, material_code: FAB-LN-03, supplier: Rajasthan Linen Co, quantity: 900, unit: m,
+         due_date: today+3, revised_eta: today+3, status: OPEN, unit_price: 240}
+    goods_receipts:
+      - {grn_number: GRN-5507, po_number: PO-7711, material_code: FAB-LN-03, quantity: 810, received_date: today-6}
+    supplier_invoices:
+      - {voucher_id: V-10448, invoice_number: RLC-2291, supplier: Rajasthan Linen Co, po_number: PO-7711, material_code: FAB-LN-03,
+         quantity: 900, unit_price: 240, total_amount: 216000, invoice_date: today-5, status: OPEN}
+  expect:
+    work: [{type: INVOICE_MISMATCH, group: RLC-2291}]
+    findings:
+      INVOICE_MISMATCH:
+        outcome: [FINDING]
+        recommendation: raise_invoice_query
+        no_validation_notes: true
+
+- id: lookup_question_on_fast_path
+  description: A simple lookup the cheap model should answer from one tool, with grounded numbers.
+  question: What is the stock coverage of HM-118 right now?
+  datasets:
+    inventory:
+      - {sku: HM-118, location: JAIPUR-WH, product_name: Linen table runner, available: 5000, reserved: 0, incoming: 0}
+    order_lines:
+      - {order_id: L, line_no: 1, channel: d2c, sku: HM-118, quantity: 20, status: delivered, days_ago: [0, 29]}
+  expect:
+    work: []
+    findings:
+      MANAGEMENT_QUESTION:
+        outcome: [FINDING]
+        no_validation_notes: true
+
+- id: out_of_scope_question
+  description: General-knowledge questions are declined (business scope boundary, Lock 08).
+  question: Who is the President of India?
+  expect:
+    work: []
+    findings:
+      MANAGEMENT_QUESTION:
+        outcome: [OUT_OF_SCOPE]

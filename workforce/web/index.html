@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>AI Workforce</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 30 30'%3E%3Cpolygon points='15,3 27,9 15,15 3,9' fill='%23AFC6FC'/%3E%3Cpolygon points='3,9 15,15 15,27 3,21' fill='%237099F2'/%3E%3Cpolygon points='27,9 15,15 15,27 27,21' fill='%234A79F0'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="login" id="login" hidden>
+  <form id="loginForm" autocomplete="on">
+    <div class="login-brand"><span class="logo" aria-hidden="true"></span><div><b>AI Workforce</b><span>For founders and managers</span></div></div>
+    <h1>Sign in</h1>
+    <label for="email">Work email<input id="email" type="email" required autocomplete="username"></label>
+    <label for="password">Password<input id="password" type="password" required autocomplete="current-password"></label>
+    <div class="err" id="loginErr" role="alert"></div>
+    <button class="btn primary block" type="submit">Sign in</button>
+    <p class="hint">Accounts are created by your administrator. Every sign-in is recorded.</p>
+  </form>
+</div>
+
+<div class="app" id="app" hidden>
+  <header class="topbar">
+    <a class="brand" href="#/" aria-label="Home"><span class="logo" aria-hidden="true"></span><div><b id="tenantName">AI Workforce</b><span>AI Workforce</span></div></a>
+    <form class="ask" id="askForm" role="search">
+      <span class="ic" data-icon="search" aria-hidden="true"></span>
+      <input id="askInput" maxlength="500" placeholder="Ask about your business — e.g. which products might run out this week?" aria-label="Ask a question about your business">
+      <button class="btn primary sm" type="submit">Ask</button>
+    </form>
+    <div class="top-right">
+      <a class="status-chip" id="dataChip" href="#/data"></a>
+      <a class="status-chip" id="aiChip" href="#/ai"></a>
+      <a class="icon-btn" id="bellBtn" href="#/alerts" aria-label="Alerts"><span class="ic" data-icon="bell" aria-hidden="true"></span><span class="count" id="bellCount" hidden>0</span></a>
+      <div class="user" id="userMenu">
+        <button class="user-btn" id="userBtn" aria-haspopup="true" aria-expanded="false"><span class="avatar" id="userInitial">·</span><span class="user-txt"><b id="userName"></b><small id="userRole"></small></span><span class="ic" data-icon="chevron-down" aria-hidden="true"></span></button>
+        <div class="menu" id="userDrop" hidden>
+          <div class="menu-head" id="userEmail"></div>
+          <a href="#/help">How this works</a>
+          <button id="logoutBtn">Sign out</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <nav class="sidebar" id="sidebar" aria-label="Main"></nav>
+
+  <main class="content" id="content" tabindex="-1"></main>
+
+  <section class="floor-page" id="floorPage" hidden aria-label="Live floor">
+    <div class="page-head"><div><h1>Live floor</h1><p class="sub">Your AI employees at work. They move only when something really happens. Click a person or a building for details.</p></div>
+      <div class="seg"><label class="switch" for="visToggle"><input type="checkbox" id="visToggle" checked><span>Animation</span></label><button class="btn sm" id="pauseBtn" aria-pressed="false">Pause</button></div></div>
+    <div class="floor-grid">
+      <div class="card floor-card">
+        <svg id="world" role="img" aria-label="Miniature company campus with AI employees moving between areas as real work events happen"></svg>
+        <span class="lag" id="lag" hidden></span>
+        <div class="off" id="offPanel" hidden><h3>Animation is off</h3><p>Your AI team keeps working as normal. Everything appears in the list on the right.</p></div>
+        <div class="legend" aria-hidden="true"><span><i style="background:#9AAAC8"></i>Idle</span><span><i style="background:#4A79F0"></i>Working</span><span><i style="background:#F28C28"></i>Waiting for you</span></div>
+        <div class="zoom"><button class="icon-btn sm" id="zin" aria-label="Zoom in">+</button><button class="icon-btn sm" id="zout" aria-label="Zoom out">−</button><button class="icon-btn sm" id="zreset" aria-label="Reset view">⤢</button></div>
+      </div>
+      <aside class="card floor-side" id="floorSide" aria-live="polite"></aside>
+    </div>
+  </section>
+</div>
+<div class="toast" id="toast" role="status" hidden></div>
+<script type="module" src="/static/js/main.js"></script>
+</body>
+</html>

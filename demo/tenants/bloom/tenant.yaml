@@ -1,0 +1,323 @@
+# Demo company: Bloom Apparel — online-only fashion brand (UK), no factory.
+# Differs from the others: semicolon-separated exports, UK dates (DD/MM/YYYY), GBP, size-level
+# stock, a returns feed, a Customer AI that watches return rates, and an ads feed that is
+# missing on purpose so the platform's source-failure handling is visible.
+
+id: bloom
+name: Bloom Apparel
+business: >-
+  Bloom Apparel designs and sells women's clothing online in the UK through its own web store.
+  Production is outsourced to partner workshops. In scope: online sales, returns and customer
+  experience, stock at the fulfilment centre, and marketing performance of Bloom Apparel's own business.
+timezone: Europe/London
+currency: GBP
+
+ai:
+  strong: ${DEMO_STRONG_MODEL:-anthropic:claude-opus-5-5:medium}
+  cheap: ${DEMO_CHEAP_MODEL:-anthropic:claude-haiku-5-5:low}
+  max_steps: 6
+  daily_token_budget: 800000
+
+sources:
+  shop:
+    type: csv
+    label: Web store exports
+    location: ${BLOOM_DATA_DIR}
+    delimiter: ";"
+    schedule_minutes: 30
+  ads:
+    type: csv
+    label: Ads platform feed
+    location: ${BLOOM_DATA_DIR}/ads
+    schedule_minutes: 60
+
+datasets:
+  orders:
+    label: Web orders
+    source: shop
+    extract: orders_export.csv
+    key: [order_ref, line]
+    date_field: order_date
+    fields:
+      order_ref: {required: true}
+      line: {type: integer, required: true}
+      order_date: {type: date, format: "%d/%m/%Y", required: true}
+      style: {column: style_code, required: true}
+      size: {}
+      quantity: {column: qty, type: integer, required: true}
+      price: {column: price_gbp, type: number}
+      customer_email: {sensitive: true}
+  returns:
+    label: Returns
+    source: shop
+    extract: returns_export.csv
+    key: [return_ref]
+    date_field: return_date
+    fields:
+      return_ref: {required: true}
+      return_date: {type: date, format: "%d/%m/%Y", required: true}
+      style: {column: style_code, required: true}
+      size: {}
+      quantity: {column: qty, type: integer, required: true}
+      reason: {required: true}
+  stock:
+    label: Fulfilment stock
+    source: shop
+    extract: stock_levels.csv
+    mode: snapshot
+    key: [style, size]
+    fields:
+      style: {column: style_code, required: true}
+      size: {required: true}
+      available: {type: integer, required: true}
+  ad_spend:
+    label: Ad spend
+    source: ads
+    extract: daily_spend.csv
+    key: [day, campaign]
+    date_field: day
+    fields:
+      day: {type: date, format: "%d/%m/%Y", required: true}
+      campaign: {required: true}
+      style: {column: style_code}
+      spend: {type: number}
+
+metrics:
+  units_14d:
+    label: Units sold (14 days)
+    unit: units
+    dataset: orders
+    agg: sum
+    value: quantity
+    window_days: 14
+    by: [style]
+  returns_14d:
+    label: Units returned (14 days)
+    unit: units
+    dataset: returns
+    agg: sum
+    value: quantity
+    window_days: 14
+    by: [style]
+  returns_by_reason:
+    label: Units returned by reason (14 days)
+    unit: units
+    dataset: returns
+    agg: sum
+    value: quantity
+    window_days: 14
+    by: [style, reason]
+  returns_by_size:
+    label: Units returned by size (14 days)
+    unit: units
+    dataset: returns
+    agg: sum
+    value: quantity
+    window_days: 14
+    by: [style, size]
+  return_rate:
+    label: Return rate (14 days)
+    unit: share of units
+    formula: returns_14d / units_14d
+    by: [style]
+  stock_units:
+    label: Units available
+    unit: units
+    dataset: stock
+    agg: sum
+    value: available
+    by: [style]
+  demand_7d:
+    label: Average daily sales (7 days)
+    unit: units/day
+    dataset: orders
+    agg: sum
+    value: quantity
+    window_days: 7
+    per_day: true
+    by: [style]
+  coverage_days:
+    label: Stock coverage
+    unit: days
+    formula: stock_units / demand_7d
+    by: [style]
+  spend_7d:
+    label: Ad spend (7 days)
+    unit: GBP
+    dataset: ad_spend
+    agg: sum
+    value: spend
+    window_days: 7
+    by: [style]
+
+rules:
+  - id: return_spike
+    description: More than 30% of units sold in the last 14 days came back.
+    for_each: style
+    when: return_rate > 0.3 and units_14d >= 30
+    metrics: [return_rate, units_14d, returns_14d]
+    work_type: RETURN_SPIKE
+    employee: customer_ai
+    priority: HIGH
+    title: Return spike · {style}
+  - id: stockout_risk
+    description: Stock covers less than 5 days of sales.
+    for_each: style
+    when: coverage_days < 5 and demand_7d > 0
+    metrics: [stock_units, demand_7d, coverage_days]
+    work_type: STOCKOUT_RISK
+    employee: inventory_ai
+    priority: HIGH
+    title: Stockout risk · {style}
+
+employees:
+  executive_ai:
+    name: Executive AI
+    title: Executive Intelligence
+    prefix: EXE
+    area: hq
+    color: "#22396B"
+    answers_questions: true
+    role: Answer the founders' questions about Bloom Apparel using colleagues' tools.
+    tools: [get_coverage]
+    can_ask: [customer_ai, inventory_ai, marketing_ai]
+  customer_ai:
+    name: Customer AI
+    title: Customer Intelligence
+    prefix: CUS
+    area: care_centre
+    color: "#D9608C"
+    role: Watch returns and customer experience; find why a style comes back and what to do about it.
+    tools: [get_returns_by_reason, get_returns_by_size, get_style_sales]
+    can_ask: [inventory_ai, marketing_ai]
+    actions: [pause_style]
+  inventory_ai:
+    name: Inventory AI
+    title: Inventory Intelligence
+    prefix: INV
+    area: fulfilment
+    color: "#F28C28"
+    role: Keep styles in stock at the fulfilment centre by size.
+    tools: [get_stock_by_size, get_style_sales]
+  marketing_ai:
+    name: Marketing AI
+    title: Marketing Intelligence
+    prefix: MKT
+    area: studio
+    color: "#4A79F0"
+    role: Track ad spend and campaign performance by style.
+    tools: [get_ad_spend]
+
+tools:
+  get_returns_by_reason:
+    label: Why customers sent it back
+    kind: metrics
+    description: Units returned in the last 14 days for a style, by return reason.
+    area: care_centre
+    metrics: [returns_by_reason]
+    breakdown: reason
+    params:
+      style: {required: true}
+  get_returns_by_size:
+    label: Returns by size
+    kind: metrics
+    description: Units returned in the last 14 days for a style, by size.
+    area: care_centre
+    metrics: [returns_by_size]
+    breakdown: size
+    params:
+      style: {required: true}
+  get_style_sales:
+    label: Sales and return rate
+    kind: metrics
+    description: Units sold (14 days), return rate and average daily sales for a style.
+    area: storefront
+    metrics: [units_14d, return_rate, demand_7d]
+    params:
+      style: {required: true}
+  get_stock_by_size:
+    label: Stock by size
+    kind: lookup
+    description: Units available at the fulfilment centre for a style, by size.
+    area: fulfilment
+    dataset: stock
+    params:
+      style: {required: true}
+    fields: [style, size, available]
+  get_ad_spend:
+    label: Ad spend
+    kind: metrics
+    description: Ad spend over the last 7 days for a style.
+    area: studio
+    metrics: [spend_7d]
+    params:
+      style: {required: true}
+  get_coverage:
+    label: How many days the stock will last
+    kind: metrics
+    description: Days of stock cover by style (lowest first), optionally for one style.
+    area: hq
+    metrics: [coverage_days]
+    params:
+      style: {}
+    limit: 15
+
+actions:
+  pause_style:
+    label: Pause style
+    description: Temporarily hide a style from the web store while a quality or fit issue is checked
+    handler: record
+    level: 2
+    area: storefront
+    params:
+      style: {required: true}
+      reason: {required: true}
+    approvers:
+      - {role: owner}
+
+layout:
+  extent: [24, 16]
+  areas:
+    fulfilment: {name: Fulfilment centre, subtitle: "Pick, pack and returns intake", building: warehouse, footprint: [2, 1.5, 5, 4.5], height: 2.3, door: [7.55, 5.5], sign: FULFILMENT, spots: {returns: [8.1, 3.4]}}
+    studio: {name: Studio, subtitle: Design and marketing, building: office, footprint: [10.6, 2.4, 3.6, 2.6], height: 2.2, door: [12.4, 5.4], sign: STUDIO}
+    hq: {name: HQ, subtitle: Founders and Executive AI, building: tower, footprint: [17.2, 2.5, 4, 4.3], height: 4.6, door: [19, 7.25], sign: BLOOM HQ}
+    storefront: {name: Web store, subtitle: Online sales, building: store, footprint: [3.5, 10.2, 3.8, 3.0], height: 2.0, door: [7.75, 11.7], sign: BLOOM}
+    care_centre: {name: Customer care, subtitle: Returns and customer experience, building: office, footprint: [10.6, 10.4, 3.6, 2.6], height: 1.9, door: [12.4, 13.4], sign: CUSTOMER CARE}
+    approvals: {name: Approval desk, subtitle: Decisions waiting for the founders, building: pavilion, footprint: [16.4, 10.6, 3.2, 2.2], door: [18, 13.35], sign: APPROVALS}
+  roads:
+    - [0.2, 7.5, 22.8, 9.0]
+    - [8.0, 2.6, 9.5, 15.4]
+  walkways:
+    - [15.0, 9.0, 15.6, 14.4]
+    - [9.5, 13.8, 19.2, 14.4]
+    - [12.1, 5.0, 12.7, 7.5]
+  paths:
+    - [[0.8, 8.25], [8.75, 8.25], [12.4, 8.25], [15.3, 8.25], [19, 8.25], [22.5, 8.25]]
+    - [[8.75, 3.0], [8.75, 3.4], [8.75, 5.5], [8.75, 8.25], [8.75, 11.7], [8.75, 14.1]]
+    - [[8.75, 14.1], [12.4, 14.1], [15.3, 14.1], [18, 14.1]]
+    - [[15.3, 8.25], [15.3, 14.1]]
+  props:
+    - {type: rack, at: [7.15, 2.0], label: RETURNS}
+    - {type: truck, at: [6.4, 6.95]}
+    - {type: pallets, at: [0.6, 5.6]}
+    - {type: crates, at: [13.45, 13.15]}
+    - {type: staff, at: [2.45, 6.95]}
+    - {type: staff, at: [9.9, 12.4]}
+    - {type: tree, at: [0.8, 1.0]}
+    - {type: tree, at: [9.9, 0.9], size: 0.9}
+    - {type: tree, at: [15.3, 1.2], size: 0.85}
+    - {type: tree, at: [16.2, 4.8], size: 0.9}
+    - {type: tree, at: [22.3, 2.2], size: 1.05}
+    - {type: tree, at: [0.9, 10.2]}
+    - {type: tree, at: [1.3, 12.9], size: 1.1}
+    - {type: tree, at: [2.6, 14.9], size: 0.9}
+    - {type: tree, at: [14.4, 15.3]}
+    - {type: tree, at: [20.9, 10.6]}
+    - {type: tree, at: [21.9, 12.6], size: 0.9}
+    - {type: bush, at: [16.1, 9.7]}
+    - {type: bush, at: [4.2, 9.6]}
+    - {type: bush, at: [19.9, 13.6]}
+    - {type: lamp, at: [3.4, 7.3]}
+    - {type: lamp, at: [16.9, 7.3]}
+    - {type: lamp, at: [21.9, 7.3]}
+    - {type: lamp, at: [4.6, 9.2]}

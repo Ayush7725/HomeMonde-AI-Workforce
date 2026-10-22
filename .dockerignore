@@ -1,0 +1,12 @@
+.env
+*.db
+*.db-*
+__pycache__/
+tests/
+tenants/
+exports/
+.git/
+demo/.runtime/
+backups/
+.venv/
+*.egg-info/

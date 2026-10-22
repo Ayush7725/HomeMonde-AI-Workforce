@@ -1,0 +1,37 @@
+# One-command demo on Postgres with four made-up companies and dummy data:
+#   docker compose -f docker-compose.demo.yml up --build
+# then open http://127.0.0.1:8100 (every demo account uses the password demo-workforce-2026).
+# AI is optional: put a key in .env.demo (see .env.demo.example) or paste one in Operations › AI models & keys.
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: workforce
+      POSTGRES_USER: workforce
+      POSTGRES_PASSWORD: demo-only-password
+    volumes:
+      - demo-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U workforce -d workforce"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+  demo:
+    build: {context: ., dockerfile: Dockerfile.demo}
+    command: ["python", "demo/run.py", "--host", "0.0.0.0",
+              "--database-url", "postgresql+psycopg://workforce:demo-only-password@db:5432/workforce"]
+    env_file:
+      - path: .env.demo
+        required: false
+    volumes:
+      - demo-runtime:/app/demo/.runtime   # generated data and the key that encrypts saved AI keys
+    ports:
+      - "127.0.0.1:8100:8100"
+    depends_on:
+      db: {condition: service_healthy}
+    restart: unless-stopped
+
+volumes:
+  demo-pgdata:
+  demo-runtime:

@@ -1,0 +1,86 @@
+# One company per deployment: set the tenant packs and secrets in .env, then `docker compose up -d`.
+x-logging: &logging   # bounded logs: a long-running deployment never fills the disk
+  driver: json-file
+  options: {max-size: "10m", max-file: "5"}
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: workforce
+      POSTGRES_USER: workforce
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U workforce -d workforce"]
+      interval: 5s
+      retries: 10
+    logging: *logging
+    restart: unless-stopped
+
+  migrate:
+    build: .
+    command: ["workforce", "migrate"]
+    env_file: .env
+    healthcheck: {disable: true}
+    environment: &dburl
+      WORKFORCE_DATABASE_URL: postgresql+psycopg://workforce:${POSTGRES_PASSWORD}@db:5432/workforce
+    depends_on:
+      db: {condition: service_healthy}
+    logging: *logging
+
+  api:
+    build: .
+    env_file: .env
+    environment: *dburl
+    volumes: &mounts
+      - ./tenants:/app/tenants:ro
+      - ${EXPORTS_DIR:-./exports}:/data/exports:ro
+    ports:
+      - "127.0.0.1:8000:8000"   # publish through your TLS reverse proxy, not directly
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    logging: *logging
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["workforce", "worker"]
+    env_file: .env
+    environment: *dburl
+    volumes: *mounts
+    healthcheck:   # unhealthy when the worker has not looped for 3 minutes (it restarts itself after 15)
+      test: ["CMD", "workforce", "worker-health"]
+      interval: 60s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    stop_grace_period: 60s   # running investigations finish or are safely re-queued by their lease
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    logging: *logging
+    restart: unless-stopped
+
+  backup:   # daily database dump (pg_restore format, compressed), 14 days kept, in ./backups; see README › Backup
+    image: postgres:16
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ${BACKUP_DIR:-./backups}:/backups
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        while true; do
+          f=/backups/workforce-$$(date +%Y%m%d-%H%M).dump
+          pg_dump -h db -U workforce -Fc workforce > "$$f.part" && mv "$$f.part" "$$f" && echo "backup $$f"
+          find /backups -name 'workforce-*.dump' -mtime +14 -delete
+          sleep 86400
+        done
+    depends_on:
+      db: {condition: service_healthy}
+    logging: *logging
+    restart: unless-stopped
+
+volumes:
+  pgdata:

@@ -1,0 +1,22 @@
+# Demo image: the platform plus the four demo companies and their dummy-data generator.
+# Not for a real company (use Dockerfile with your own tenant pack). See docker-compose.demo.yml.
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+WORKDIR /app
+
+COPY pyproject.toml ./
+COPY workforce ./workforce
+RUN pip install . && useradd --system --uid 10001 --create-home workforce
+
+COPY alembic.ini ./
+COPY migrations ./migrations
+COPY tenants/homemonde ./tenants/homemonde
+COPY demo/run.py demo/generate.py ./demo/
+COPY demo/tenants ./demo/tenants
+RUN mkdir -p demo/.runtime && chown workforce demo/.runtime
+
+USER workforce
+EXPOSE 8100
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s CMD python -c "import os, urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"PORT\") or 8100}/api/health')"
+CMD ["python", "demo/run.py", "--host", "0.0.0.0"]

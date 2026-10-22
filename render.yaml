@@ -1,0 +1,29 @@
+# Render Blueprint: the public demo (four dummy companies) as one free Docker web service.
+# render.com → New → Blueprint → pick this repo. Paste a GEMINI_API_KEY (or another provider's key) when asked,
+# or leave it empty: the AI employees then report verified facts only. The demo data is regenerated on every start.
+services:
+  - type: web
+    name: homemonde-ai-workforce
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile.demo
+    dockerContext: .
+    healthCheckPath: /api/health
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false            # secret: asked for in the dashboard, never stored in the repo
+      - key: WORKFORCE_SECRET_KEY
+        generateValue: true
+      # Free-tier Gemini models; switch provider by changing these and the key (see .env.demo.example).
+      - key: HOMEMONDE_STRONG_MODEL
+        value: gemini:gemini-3.5-flash-lite
+      - key: HOMEMONDE_PREMIUM_MODEL
+        value: gemini:gemini-3.8-flash
+      - key: HOMEMONDE_CHEAP_MODEL
+        value: gemini:gemini-3.1-flash-lite
+      - key: DEMO_STRONG_MODEL
+        value: gemini:gemini-3.5-flash-lite
+      - key: DEMO_CHEAP_MODEL
+        value: gemini:gemini-3.1-flash-lite
+      - key: WORKFORCE_WORKER_CONCURRENCY
+        value: "1"             # free tiers allow a few requests a minute

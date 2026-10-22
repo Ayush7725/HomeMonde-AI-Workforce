@@ -1,0 +1,292 @@
+# Demo company: Kavya Foods — packaged foods maker and distributor (India).
+# Differs from HomeMonde: data comes from an ERP database (SQL), ERP column names, batch-level stock
+# with expiry dates, a packing unit run by its own Manufacturing AI, and an expiry-risk rule.
+
+id: kavya
+name: Kavya Foods
+business: >-
+  Kavya Foods makes and distributes packaged foods (snacks, staples, ready mixes, pulps) to general
+  trade, modern trade and e-commerce across India. In scope: sales, stock and expiry, production at
+  the packing unit, procurement and distribution of Kavya Foods' own business.
+timezone: Asia/Kolkata
+currency: INR
+
+ai:
+  strong: ${DEMO_STRONG_MODEL:-anthropic:claude-opus-5-5:medium}
+  cheap: ${DEMO_CHEAP_MODEL:-anthropic:claude-haiku-5-5:low}
+  max_steps: 6
+  daily_token_budget: 1500000
+
+sources:
+  erp:
+    type: sql
+    label: Kavya ERP
+    location: ${KAVYA_ERP_URL}
+    schedule_minutes: 30
+
+datasets:
+  stock_batches:
+    label: Batch stock
+    source: erp
+    extract: SELECT item_code, batch_no, wh_code, qty_on_hand, exp_dt FROM inv_batch
+    mode: snapshot
+    key: [sku, batch_no]
+    fields:
+      sku: {column: item_code, required: true}
+      batch_no: {required: true}
+      warehouse: {column: wh_code}
+      quantity: {column: qty_on_hand, type: integer, required: true}
+      expiry_date: {column: exp_dt, type: date, required: true}
+
+  sales_lines:
+    label: Sales invoices
+    source: erp
+    extract: SELECT inv_no, line_no, inv_date, item_code, qty, amount, channel_code, status FROM sales_line
+    key: [invoice_no, line_no]
+    date_field: invoice_date
+    fields:
+      invoice_no: {column: inv_no, required: true}
+      line_no: {type: integer, required: true}
+      invoice_date: {column: inv_date, type: date, required: true}
+      sku: {column: item_code, required: true}
+      quantity: {column: qty, type: integer, required: true}
+      amount: {type: number}
+      channel: {column: channel_code, required: true}
+      status: {required: true}
+
+  production_orders:
+    label: Packing unit orders
+    source: erp
+    extract: SELECT mo_no, item_code, planned_qty, start_dt, status, remarks FROM mfg_order
+    key: [order_no]
+    fields:
+      order_no: {column: mo_no, required: true}
+      sku: {column: item_code, required: true}
+      planned_quantity: {column: planned_qty, type: integer}
+      start_date: {column: start_dt, type: date}
+      status: {}
+      remarks: {}
+
+metrics:
+  units_on_hand:
+    label: Units on hand
+    unit: units
+    dataset: stock_batches
+    agg: sum
+    value: quantity
+    by: [sku]
+  units_expiring_30d:
+    label: Units expiring within 30 days
+    unit: units
+    dataset: stock_batches
+    agg: sum
+    value: quantity * (days_until_expiry_date <= 30)
+    by: [sku]
+  demand_7d:
+    label: Average daily sales (7 days)
+    unit: units/day
+    dataset: sales_lines
+    agg: sum
+    value: quantity
+    where: {status: [INVOICED, DELIVERED]}
+    window_days: 7
+    per_day: true
+    by: [sku]
+  demand_30d:
+    label: Average daily sales (30 days)
+    unit: units/day
+    dataset: sales_lines
+    agg: sum
+    value: quantity
+    where: {status: [INVOICED, DELIVERED]}
+    window_days: 30
+    per_day: true
+    by: [sku]
+  demand_7d_by_channel:
+    label: Average daily sales by channel (7 days)
+    unit: units/day
+    dataset: sales_lines
+    agg: sum
+    value: quantity
+    where: {status: [INVOICED, DELIVERED]}
+    window_days: 7
+    per_day: true
+    by: [sku, channel]
+  stock_coverage_days:
+    label: Stock coverage
+    unit: days
+    formula: units_on_hand / demand_7d
+    by: [sku]
+  days_to_sell_expiring:
+    label: Days needed to sell stock expiring within 30 days
+    unit: days
+    formula: units_expiring_30d / demand_7d
+    by: [sku]
+
+rules:
+  - id: expiry_risk
+    description: Stock expiring within 30 days cannot be sold in time at the current sales rate.
+    for_each: sku
+    when: units_expiring_30d > 0 and days_to_sell_expiring > 30
+    metrics: [units_expiring_30d, units_on_hand, demand_7d, days_to_sell_expiring]
+    work_type: EXPIRY_RISK
+    employee: inventory_ai
+    priority: HIGH
+    title: Expiry risk · {sku}
+  - id: stockout_risk
+    description: Stock covers less than 4 days of recent sales.
+    for_each: sku
+    when: stock_coverage_days < 4 and demand_7d > 0
+    metrics: [units_on_hand, demand_7d, demand_30d, stock_coverage_days]
+    work_type: STOCKOUT_RISK
+    employee: inventory_ai
+    priority: HIGH
+    title: Stockout risk · {sku}
+
+employees:
+  executive_ai:
+    name: Executive AI
+    title: Executive Intelligence
+    prefix: EXE
+    area: hq
+    color: "#22396B"
+    answers_questions: true
+    role: Answer management questions about Kavya Foods and bring decisions to the owners with evidence.
+    tools: [get_stock_coverage]
+    can_ask: [inventory_ai, sales_ai, production_ai]
+  inventory_ai:
+    name: Inventory AI
+    title: Inventory Intelligence
+    prefix: INV
+    area: cold_store
+    color: "#F28C28"
+    role: Keep batch stock fresh and available; investigate expiry and stockout risks across sales and production.
+    tools: [get_batches, get_production_orders]
+    can_ask: [sales_ai, production_ai]
+    actions: [create_markdown]
+  sales_ai:
+    name: Sales AI
+    title: Sales Intelligence
+    prefix: SAL
+    area: distribution
+    color: "#17A08E"
+    role: Understand sales by channel (general trade, modern trade, e-commerce).
+    tools: [get_sales_velocity, get_sales_by_channel]
+  production_ai:
+    name: Manufacturing AI
+    title: Manufacturing Intelligence
+    prefix: MFG
+    area: packing_unit
+    color: "#C2557A"
+    role: Track packing unit orders, plans and blockers.
+    tools: [get_production_orders]
+
+tools:
+  get_batches:
+    label: Stock batches and expiry dates
+    kind: lookup
+    description: Batch-level stock for a SKU with warehouse, quantity and expiry date (earliest expiry first).
+    area: cold_store
+    dataset: stock_batches
+    params:
+      sku: {required: true}
+    fields: [sku, batch_no, warehouse, quantity, expiry_date]
+    order_by: expiry_date
+  get_production_orders:
+    label: Packing unit orders
+    kind: lookup
+    description: Packing unit orders for a SKU with planned quantity, start date, status and remarks.
+    area: packing_unit
+    dataset: production_orders
+    params:
+      sku: {required: true}
+    fields: [order_no, sku, planned_quantity, start_date, status, remarks]
+    order_by: start_date
+  get_sales_velocity:
+    label: How fast it is selling
+    kind: metrics
+    description: Average daily sales for a SKU over 7 and 30 days.
+    area: distribution
+    metrics: [demand_7d, demand_30d]
+    params:
+      sku: {required: true}
+  get_sales_by_channel:
+    label: Sales by channel
+    kind: metrics
+    description: Average daily sales for a SKU over 7 days by channel (GT, MT, ECOM).
+    area: distribution
+    metrics: [demand_7d_by_channel]
+    breakdown: channel
+    params:
+      sku: {required: true}
+  get_stock_coverage:
+    label: How many days the stock will last
+    kind: metrics
+    description: Days of stock cover by SKU (lowest first), optionally for one SKU.
+    area: hq
+    metrics: [stock_coverage_days]
+    params:
+      sku: {}
+    limit: 15
+
+actions:
+  create_markdown:
+    label: Markdown
+    description: Offer a discount on near-expiry stock in one channel
+    handler: record
+    level: 2
+    area: distribution
+    params:
+      sku: {required: true}
+      channel: {required: true, enum: [GT, MT, ECOM]}
+      quantity: {type: integer, required: true, minimum: 1}
+      discount_pct: {type: number, required: true, minimum: 1, maximum: 40}
+    approvers:
+      - {role: manager}
+      - {role: owner}
+
+layout:
+  extent: [24, 16]
+  areas:
+    cold_store: {name: Cold store, subtitle: Batch stock and expiry, building: warehouse, footprint: [2, 1.5, 5, 4.5], height: 2.6, door: [7.55, 5.5], sign: COLD STORE}
+    packing_unit: {name: Packing unit, subtitle: "Roasting, mixing and packing lines", building: factory, footprint: [10.5, 1.5, 5, 4.5], height: 2.4, door: [14.2, 6.6], sign: PACKING}
+    hq: {name: Head office, subtitle: Owners and Executive AI, building: tower, footprint: [17.2, 2.5, 4, 4.3], height: 4.4, door: [19, 7.25], sign: KAVYA FOODS}
+    distribution: {name: Distribution, subtitle: "GT, MT and e-commerce dispatch", building: store, footprint: [3.5, 10.2, 3.8, 3.0], height: 2.0, door: [7.75, 11.7], sign: DISPATCH}
+    purchase: {name: Purchase office, subtitle: Raw materials and packaging, building: office, footprint: [10.6, 10.4, 3.6, 2.6], height: 1.9, door: [12.4, 13.4], sign: PURCHASE}
+    approvals: {name: Approval desk, subtitle: Decisions waiting for the owners, building: pavilion, footprint: [16.4, 10.6, 3.2, 2.2], door: [18, 13.35], sign: APPROVALS}
+  roads:
+    - [0.2, 7.5, 22.8, 9.0]
+    - [8.0, 2.6, 9.5, 15.4]
+  walkways:
+    - [15.0, 9.0, 15.6, 14.4]
+    - [9.5, 13.8, 19.2, 14.4]
+  paths:
+    - [[0.8, 8.25], [8.75, 8.25], [14.2, 8.25], [15.3, 8.25], [19, 8.25], [22.5, 8.25]]
+    - [[8.75, 3.0], [8.75, 5.5], [8.75, 8.25], [8.75, 11.7], [8.75, 14.1]]
+    - [[8.75, 14.1], [12.4, 14.1], [15.3, 14.1], [18, 14.1]]
+    - [[15.3, 8.25], [15.3, 14.1]]
+  props:
+    - {type: tanks, at: [16.1, 2.4]}
+    - {type: pallets, at: [0.6, 5.6]}
+    - {type: pallets, at: [0.4, 2.2]}
+    - {type: truck, at: [6.4, 6.95]}
+    - {type: crates, at: [2.7, 13.6]}
+    - {type: crates, at: [13.45, 13.15]}
+    - {type: staff, at: [2.45, 6.95]}
+    - {type: staff, at: [12.1, 6.85]}
+    - {type: staff, at: [9.9, 12.0]}
+    - {type: tree, at: [9.9, 0.9], size: 0.9}
+    - {type: tree, at: [22.3, 2.2], size: 1.05}
+    - {type: tree, at: [22.4, 5.7], size: 0.9}
+    - {type: tree, at: [0.9, 10.2]}
+    - {type: tree, at: [1.3, 12.9], size: 1.1}
+    - {type: tree, at: [6.4, 14.8]}
+    - {type: tree, at: [14.4, 15.3]}
+    - {type: tree, at: [21.9, 12.6], size: 0.9}
+    - {type: tree, at: [21.3, 15.1], size: 1.05}
+    - {type: bush, at: [16.1, 9.7]}
+    - {type: bush, at: [19.9, 13.6]}
+    - {type: lamp, at: [3.4, 7.3]}
+    - {type: lamp, at: [11.2, 7.3]}
+    - {type: lamp, at: [16.9, 7.3]}
+    - {type: lamp, at: [20.3, 9.2]}

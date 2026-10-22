@@ -1,0 +1,11 @@
+.env
+*.db
+*.db-*
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.venv/
+exports/
+demo/.runtime/
+backups/
+.env.demo
